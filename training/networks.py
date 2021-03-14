@@ -266,7 +266,11 @@ class SynthesisLayer(torch.nn.Module):
         channels_last   = False,        # Use channels_last format for the weights?
     ):
         super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.w_dim = w_dim
         self.resolution = resolution
+        self.kernel_size = kernel_size
         self.up = up
         self.use_noise = use_noise
         self.activation = activation

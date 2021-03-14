@@ -25,6 +25,8 @@ import legacy
 from metrics import metric_main
 
 #----------------------------------------------------------------------------
+from training.switched_conv import SwitchedConvConversionWrapper
+
 
 def setup_snapshot_image_grid(training_set, random_seed=0):
     rnd = np.random.RandomState(random_seed)
@@ -118,6 +120,7 @@ def training_loop(
     allow_tf32              = False,    # Enable torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32?
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
+    switched_conv_breadth   = None,
 ):
     # Initialize.
     start_time = time.time()
@@ -148,16 +151,27 @@ def training_loop(
         print('Constructing networks...')
     common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=training_set.resolution, img_channels=training_set.num_channels)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
-    D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
+    D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
+    if switched_conv_breadth is not None:
+        #G_wrap = SwitchedConvConversionWrapper(G, switched_conv_breadth, ['synthesis.b128.conv1', 'synthesis.b128.conv0'], coupler_mode='lambda', dropout_rate=0)
+        G_wrap = SwitchedConvConversionWrapper(G, switched_conv_breadth, ['synthesis.b128.conv1'], coupler_mode='lambda', dropout_rate=0)
+        #G_ema_wrap = SwitchedConvConversionWrapper(G_ema, switched_conv_breadth, ['synthesis.b128.conv1', 'synthesis.b128.conv0'], coupler_mode='lambda', dropout_rate=0)
+        G_ema_wrap = SwitchedConvConversionWrapper(G_ema, switched_conv_breadth, ['synthesis.b128.conv1'], coupler_mode='lambda', dropout_rate=0)
+    else:
+        G_wrap = G
+        G_ema_wrap = G_ema
 
     # Resume from existing pickle.
     if (resume_pkl is not None) and (rank == 0):
         print(f'Resuming from "{resume_pkl}"')
         with dnnlib.util.open_url(resume_pkl) as f:
             resume_data = legacy.load_network_pkl(f)
-        for name, module in [('G', G), ('D', D), ('G_ema', G_ema)]:
-            misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
+        for name, module in [('G', G_wrap), ('D', D), ('G_ema', G_ema_wrap)]:
+            if name == 'G' or name == 'G_ema':
+                module.load_state_dict(resume_data[name].state_dict())
+            else:
+                misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
 
     # Print network summary tables.
     if rank == 0:
@@ -194,6 +208,7 @@ def training_loop(
         print('Setting up training phases...')
     loss = dnnlib.util.construct_class_by_name(device=device, **ddp_modules, **loss_kwargs) # subclass of training.loss.Loss
     phases = []
+    optimizers = {}
     for name, module, opt_kwargs, reg_interval in [('G', G, G_opt_kwargs, G_reg_interval), ('D', D, D_opt_kwargs, D_reg_interval)]:
         if reg_interval is None:
             opt = dnnlib.util.construct_class_by_name(params=module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
@@ -206,6 +221,9 @@ def training_loop(
             opt = dnnlib.util.construct_class_by_name(module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
             phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
             phases += [dnnlib.EasyDict(name=name+'reg', module=module, opt=opt, interval=reg_interval)]
+        if (resume_pkl is not None) and f'{name}_opt' in resume_data.keys():
+            opt.load_state_dict(resume_data[f'{name}_opt'])
+        optimizers[name] = opt
     for phase in phases:
         phase.start_event = None
         phase.end_event = None
@@ -360,6 +378,8 @@ def training_loop(
                         misc.check_ddp_consistency(module, ignore_regex=r'.*\.w_avg')
                     module = copy.deepcopy(module).eval().requires_grad_(False).cpu()
                 snapshot_data[name] = module
+                if name in optimizers.keys():
+                    snapshot_data[f'{name}_opt'] = optimizers[name].state_dict()
                 del module # conserve memory
             snapshot_pkl = os.path.join(run_dir, f'network-snapshot-{cur_nimg//1000:06d}.pkl')
             if rank == 0:
