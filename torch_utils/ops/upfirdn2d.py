@@ -13,6 +13,7 @@ import warnings
 import numpy as np
 import torch
 import traceback
+import upfirdn2d_plugin as _plugin
 
 from .. import custom_ops
 from .. import misc
@@ -20,13 +21,12 @@ from . import conv2d_gradfix
 
 #----------------------------------------------------------------------------
 
-_inited = False
-_plugin = None
+_inited = True
 
 def _init():
     global _inited, _plugin
     if not _inited:
-        sources = ['upfirdn2d.cpp', 'upfirdn2d.cu']
+        sources = ['upfirdn2d.cpp', 'upfirdn2d_cu.cu']
         sources = [os.path.join(os.path.dirname(__file__), s) for s in sources]
         try:
             _plugin = custom_ops.get_plugin('upfirdn2d_plugin', sources=sources, extra_cuda_cflags=['--use_fast_math'])

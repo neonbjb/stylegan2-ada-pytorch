@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import dnnlib
 import traceback
+import bias_act_plugin as _plugin
 
 from .. import custom_ops
 from .. import misc
@@ -34,15 +35,14 @@ activation_funcs = {
 
 #----------------------------------------------------------------------------
 
-_inited = False
-_plugin = None
+_inited = True
 _null_tensor = torch.empty([0])
 
 def _init():
     global _inited, _plugin
     if not _inited:
         _inited = True
-        sources = ['bias_act.cpp', 'bias_act.cu']
+        sources = ['bias_act.cpp', 'bias_act_cu.cu']
         sources = [os.path.join(os.path.dirname(__file__), s) for s in sources]
         try:
             _plugin = custom_ops.get_plugin('bias_act_plugin', sources=sources, extra_cuda_cflags=['--use_fast_math'])
