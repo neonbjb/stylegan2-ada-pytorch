@@ -154,13 +154,16 @@ def training_loop(
     G_ema = copy.deepcopy(G).eval()
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     if switched_conv_breadth is not None:
-        #G_wrap = SwitchedConvConversionWrapper(G, switched_conv_breadth, ['synthesis.b128.conv1', 'synthesis.b128.conv0'], coupler_mode='lambda', dropout_rate=0)
-        G_wrap = SwitchedConvConversionWrapper(G, switched_conv_breadth, ['synthesis.b128.conv1'], coupler_mode='lambda', dropout_rate=0)
-        #G_ema_wrap = SwitchedConvConversionWrapper(G_ema, switched_conv_breadth, ['synthesis.b128.conv1', 'synthesis.b128.conv0'], coupler_mode='lambda', dropout_rate=0)
-        G_ema_wrap = SwitchedConvConversionWrapper(G_ema, switched_conv_breadth, ['synthesis.b128.conv1'], coupler_mode='lambda', dropout_rate=0)
+        G_wrap = SwitchedConvConversionWrapper(G, switched_conv_breadth, ['synthesis.b128.conv1', 'synthesis.b128.conv0'], coupler_mode='lambda', dropout_rate=0)
+        #G_wrap = SwitchedConvConversionWrapper(G, switched_conv_breadth, ['synthesis.b128.conv1'], coupler_mode='lambda', dropout_rate=0)
+        G_ema_wrap = SwitchedConvConversionWrapper(G_ema, switched_conv_breadth, ['synthesis.b128.conv1', 'synthesis.b128.conv0'], coupler_mode='lambda', dropout_rate=0)
+        #G_ema_wrap = SwitchedConvConversionWrapper(G_ema, switched_conv_breadth, ['synthesis.b128.conv1'], coupler_mode='lambda', dropout_rate=0)
     else:
         G_wrap = G
         G_ema_wrap = G_ema
+    G_ema.eval()
+    for p in G_ema.parameters():
+        p.requires_grad = False
 
     # Resume from existing pickle.
     if (resume_pkl is not None) and (rank == 0):
@@ -235,14 +238,15 @@ def training_loop(
     grid_size = None
     grid_z = None
     grid_c = None
-    if rank == 0:
-        print('Exporting sample images...')
-        grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
-        save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
-        grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
-        grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-        images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
-        save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
+    with torch.no_grad():
+        if rank == 0:
+            print('Exporting sample images...')
+            grid_size, images, labels = setup_snapshot_image_grid(training_set=training_set)
+            save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
+            grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
+            grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
+            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+            save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
 
     # Initialize logs.
     if rank == 0:
@@ -263,7 +267,10 @@ def training_loop(
     if rank == 0:
         print(f'Training for {total_kimg} kimg...')
         print()
-    cur_nimg = 0
+    if (resume_pkl is not None) and (rank == 0):
+        cur_nimg = int(resume_pkl.split('-')[-1].split('.')[0])*1000
+    else:
+        cur_nimg = 0
     cur_tick = 0
     tick_start_nimg = cur_nimg
     tick_start_time = time.time()

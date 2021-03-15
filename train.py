@@ -66,6 +66,7 @@ def setup_training_loop_kwargs(
     workers    = None, # Override number of DataLoader workers: <int>, default = 3
 
     switched_conv_breadth = None,
+    ref_gpus = 1, # When using config='auto', this specifies how much batch accumulation you want to do. ref_gpus=2 means 2 forward passes per batch, for example.
 ):
     args = dnnlib.EasyDict()
     args.switched_conv_breadth = switched_conv_breadth
@@ -167,13 +168,9 @@ def setup_training_loop_kwargs(
     spec = dnnlib.EasyDict(cfg_specs[cfg])
     if cfg == 'auto':
         desc += f'{gpus:d}'
-        spec.ref_gpus = gpus
+        spec.ref_gpus = gpus if gpus != 1 else ref_gpus
         res = args.training_set_kwargs.resolution
-        if args.switched_conv_breadth is not None:
-            adj = 2
-        else:
-            adj = 1
-        spec.mb = max(min(gpus * min(4096 // (res*adj), 32), 64), gpus) # keep gpu memory consumption at bay
+        spec.mb = max(min(gpus * min(4096 // (res), 32), 64), gpus) # keep gpu memory consumption at bay
         spec.mbstd = min(spec.mb // gpus, 4) # other hyperparams behave more predictably if mbstd group size remains fixed
         spec.fmaps = 1 if res >= 512 else 0.5
         spec.lrate = 0.002 if res >= 1024 else 0.0025
@@ -444,6 +441,7 @@ class CommaSeparatedList(click.ParamType):
 
 # Extras
 @click.option('--switched_conv_breadth', help='When specified, converts network to switched_conv mode with the specified breadth', type=int, metavar='INT')
+@click.option('--ref_gpus', help='Specifies batch accumulation via "virtual" gpus', type=int, metavar='INT')
 
 def main(ctx, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper

@@ -118,7 +118,7 @@ Note: This norm makes the (potentially flawed) assumption that each forward() pa
 Note: This norm does nothing for the first <accumulator_size> iterations.
 """
 class SwitchNorm(nn.Module):
-    def __init__(self, group_size, accumulator_size=128):
+    def __init__(self, group_size, accumulator_size=512):
         super().__init__()
         self.accumulator_desired_size = accumulator_size
         self.group_size = group_size
@@ -202,7 +202,7 @@ class SwitchedConvHardRouting(nn.Module):
             coupler_dim_in = in_c
         if include_coupler:
             if coupler_mode == 'standard':
-                self.coupler = Conv2d(coupler_dim_in, breadth, kernel_size=1, stride=self.stride)
+                self.coupler = Conv2d(coupler_dim_in, breadth, kernel_size=1, stride=1)
             elif coupler_mode == 'lambda':
                 self.coupler = nn.Sequential(nn.GroupNorm(num_groups=2, num_channels=coupler_dim_in),
                                              LambdaLayer(dim=coupler_dim_in, dim_out=breadth, r=23, dim_k=16, heads=2, dim_u=1),
@@ -254,7 +254,7 @@ class SwitchedConvHardRouting(nn.Module):
 
         outs = [c(input, *args, **kwargs) for c in self.convs]
         # The SynthesisLayer this class wraps can optionally upsample the result. Lacking any real good way to integrate that into the coupler, just interpolate.
-        selector = F.interpolate(selector, size=outs[0].shape[2:], mode='bilinear')
+        selector = F.interpolate(selector, size=outs[0].shape[2:], mode='bilinear', align_corners=False)
         outs = torch.stack(outs, dim=1) * selector.unsqueeze(dim=2).type(outs[0].dtype)
         return outs.sum(dim=1)
 

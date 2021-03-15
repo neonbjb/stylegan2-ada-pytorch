@@ -3,3 +3,6 @@ __pycache__/
 results/*
 work_dirs/*
 .idea/*
+torch_utils/ops/build/*
+torch_utils/ops/dist/*
+torch_utils/ops/*.egg-info/*
