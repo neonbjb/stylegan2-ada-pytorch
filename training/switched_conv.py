@@ -118,7 +118,7 @@ Note: This norm makes the (potentially flawed) assumption that each forward() pa
 Note: This norm does nothing for the first <accumulator_size> iterations.
 """
 class SwitchNorm(nn.Module):
-    def __init__(self, group_size, accumulator_size=512):
+    def __init__(self, group_size, accumulator_size=128):
         super().__init__()
         self.accumulator_desired_size = accumulator_size
         self.group_size = group_size
