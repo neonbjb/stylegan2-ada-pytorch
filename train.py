@@ -78,8 +78,8 @@ def setup_training_loop_kwargs(
     if gpus is None:
         gpus = 1
     assert isinstance(gpus, int)
-    if not (gpus >= 1 and gpus & (gpus - 1) == 0):
-        raise UserError('--gpus must be a power of two')
+    #if not (gpus >= 1 and gpus & (gpus - 1) == 0):
+    #    raise UserError('--gpus must be a power of two')
     args.num_gpus = gpus
 
     if snap is None:

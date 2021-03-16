@@ -166,15 +166,16 @@ def training_loop(
         p.requires_grad = False
 
     # Resume from existing pickle.
-    if (resume_pkl is not None) and (rank == 0):
-        print(f'Resuming from "{resume_pkl}"')
+    if resume_pkl is not None:
         with dnnlib.util.open_url(resume_pkl) as f:
             resume_data = legacy.load_network_pkl(f)
-        for name, module in [('G', G_wrap), ('D', D), ('G_ema', G_ema_wrap)]:
-            if name == 'G' or name == 'G_ema':
-                module.load_state_dict(resume_data[name].state_dict())
-            else:
-                misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
+        if rank == 0:
+            print(f'Resuming from "{resume_pkl}"')
+            for name, module in [('G', G_wrap), ('D', D), ('G_ema', G_ema_wrap)]:
+                if name == 'G' or name == 'G_ema':
+                    module.load_state_dict(resume_data[name].state_dict())
+                else:
+                    misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
 
     # Print network summary tables.
     if rank == 0:
