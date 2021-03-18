@@ -28,6 +28,14 @@ from metrics import metric_main
 from training.switched_conv import SwitchedConvConversionWrapper
 
 
+def recurse_convert_gpu(d):
+    if not isinstance(d, dict):
+        if hasattr(d, 'cpu'):
+            d = d.cpu()
+        return d
+    return {k: recurse_convert_gpu(v) for k,v in d.items()}
+
+
 def setup_snapshot_image_grid(training_set, random_seed=0):
     rnd = np.random.RandomState(random_seed)
     gw = np.clip(7680 // training_set.image_shape[2], 7, 32)
@@ -387,7 +395,7 @@ def training_loop(
                     module = copy.deepcopy(module).eval().requires_grad_(False).cpu()
                 snapshot_data[name] = module
                 if name in optimizers.keys():
-                    snapshot_data[f'{name}_opt'] = optimizers[name].state_dict()
+                    snapshot_data[f'{name}_opt'] = recurse_convert_gpu(optimizers[name].state_dict())
                 del module # conserve memory
             snapshot_pkl = os.path.join(run_dir, f'network-snapshot-{cur_nimg//1000:06d}.pkl')
             if rank == 0:
