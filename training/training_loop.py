@@ -15,8 +15,6 @@ import psutil
 import PIL.Image
 import numpy as np
 import torch
-from torch.distributed import broadcast_object_list
-
 import dnnlib
 from torch_utils import misc
 from torch_utils import training_stats
@@ -168,15 +166,16 @@ def training_loop(
         p.requires_grad = False
 
     # Resume from existing pickle.
-    if resume_pkl is not None and rank == 0:
+    if resume_pkl is not None:
         with dnnlib.util.open_url(resume_pkl) as f:
             resume_data = legacy.load_network_pkl(f)
-        print(f'Resuming from "{resume_pkl}"')
-        for name, module in [('G', G_wrap), ('D', D), ('G_ema', G_ema_wrap)]:
-            if name == 'G' or name == 'G_ema':
-                module.load_state_dict(resume_data[name].state_dict(), strict=False)
-            else:
-                misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
+        if rank == 0:
+            print(f'Resuming from "{resume_pkl}"')
+            for name, module in [('G', G_wrap), ('D', D), ('G_ema', G_ema_wrap)]:
+                if name == 'G' or name == 'G_ema':
+                    module.load_state_dict(resume_data[name].state_dict(), strict=False)
+                else:
+                    misc.copy_params_and_buffers(resume_data[name], module, require_all=False)
 
     # Print network summary tables.
     if rank == 0:
@@ -226,12 +225,8 @@ def training_loop(
             opt = dnnlib.util.construct_class_by_name(module.parameters(), **opt_kwargs) # subclass of torch.optim.Optimizer
             phases += [dnnlib.EasyDict(name=name+'main', module=module, opt=opt, interval=1)]
             phases += [dnnlib.EasyDict(name=name+'reg', module=module, opt=opt, interval=reg_interval)]
-        if rank == 0 and (resume_pkl is not None) and f'{name}_opt' in resume_data.keys():
+        if (resume_pkl is not None) and f'{name}_opt' in resume_data.keys():
             opt.load_state_dict(resume_data[f'{name}_opt'])
-        if num_gpus > 1:
-            osd = opt.state_dict()
-            broadcast_object_list(osd, src=0, async_op=False)
-            opt.load_state_dict(osd)
         optimizers[name] = opt
     for phase in phases:
         phase.start_event = None
