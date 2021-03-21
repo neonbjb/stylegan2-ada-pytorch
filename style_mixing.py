@@ -68,7 +68,7 @@ def generate_style_mix(
 
     print('Generating W vectors...')
     all_seeds = list(set(row_seeds + col_seeds))
-    all_z = np.stack([np.random.RandomState(seed).randn(G.z_dim) for seed in all_seeds])
+    all_z = np.stack([np.random.RandomState(seed).randn(G.gen_bank.z_dim) for seed in all_seeds])
     all_w = G.mapping(torch.from_numpy(all_z).to(device), None)
     w_avg = G.mapping.w_avg
     all_w = w_avg + (all_w - w_avg) * truncation_psi

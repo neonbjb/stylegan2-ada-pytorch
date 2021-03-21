@@ -8,6 +8,8 @@
 
 import numpy as np
 import torch
+from tensorflow_datasets.core.utils import nullcontext
+
 from torch_utils import misc
 from torch_utils import persistence
 from torch_utils.ops import conv2d_resample
@@ -211,7 +213,7 @@ class MappingNetwork(torch.nn.Module):
         if num_ws is not None and w_avg_beta is not None:
             self.register_buffer('w_avg', torch.zeros([w_dim]))
 
-    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False):
+    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False, skip_trunc_and_broadcast=False):
         # Embed, normalize, and concat inputs.
         x = None
         with torch.autograd.profiler.record_function('input'):
@@ -233,6 +235,25 @@ class MappingNetwork(torch.nn.Module):
             with torch.autograd.profiler.record_function('update_w_avg'):
                 self.w_avg.copy_(x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
 
+        if skip_trunc_and_broadcast:
+            return x
+
+        # Broadcast.
+        if self.num_ws is not None:
+            with torch.autograd.profiler.record_function('broadcast'):
+                x = x.unsqueeze(1).repeat([1, self.num_ws, 1])
+
+        # Apply truncation.
+        if truncation_psi != 1:
+            with torch.autograd.profiler.record_function('truncate'):
+                assert self.w_avg_beta is not None
+                if self.num_ws is None or truncation_cutoff is None:
+                    x = self.w_avg.lerp(x, truncation_psi)
+                else:
+                    x[:, :truncation_cutoff] = self.w_avg.lerp(x[:, :truncation_cutoff], truncation_psi)
+        return x
+
+    def apply_truncation_and_broadcast(self, x, truncation_psi=1, truncation_cutoff=None):
         # Broadcast.
         if self.num_ws is not None:
             with torch.autograd.profiler.record_function('broadcast'):
@@ -380,7 +401,7 @@ class SynthesisBlock(torch.nn.Module):
             self.skip = Conv2dLayer(in_channels, out_channels, kernel_size=1, bias=False, up=2,
                 resample_filter=resample_filter, channels_last=self.channels_last)
 
-    def forward(self, x, img, ws, force_fp32=False, fused_modconv=None, **layer_kwargs):
+    def forward(self, x, img, ws, force_fp32=False, fused_modconv=None, puppet=False, **layer_kwargs):
         misc.assert_shape(ws, [None, self.num_conv + self.num_torgb, self.w_dim])
         w_iter = iter(ws.unbind(dim=1))
         dtype = torch.float16 if self.use_fp16 and not force_fp32 else torch.float32
@@ -389,13 +410,14 @@ class SynthesisBlock(torch.nn.Module):
             with misc.suppress_tracer_warnings(): # this value will be treated as a constant
                 fused_modconv = (not self.training) and (dtype == torch.float32 or int(x.shape[0]) == 1)
 
-        # Input.
-        if self.in_channels == 0:
-            x = self.const.to(dtype=dtype, memory_format=memory_format)
-            x = x.unsqueeze(0).repeat([ws.shape[0], 1, 1, 1])
-        else:
-            misc.assert_shape(x, [None, self.in_channels, self.resolution // 2, self.resolution // 2])
-            x = x.to(dtype=dtype, memory_format=memory_format)
+        if not puppet:
+            # Input.
+            if self.in_channels == 0:
+                x = self.const.to(dtype=dtype, memory_format=memory_format)
+                x = x.unsqueeze(0).repeat([ws.shape[0], 1, 1, 1])
+            else:
+                misc.assert_shape(x, [None, self.in_channels, self.resolution // 2, self.resolution // 2])
+                x = x.to(dtype=dtype, memory_format=memory_format)
 
         # Main layers.
         if self.in_channels == 0:
@@ -521,6 +543,7 @@ class DiscriminatorBlock(torch.nn.Module):
         use_fp16            = False,        # Use FP16 for this block?
         fp16_channels_last  = False,        # Use channels-last memory format with FP16?
         freeze_layers       = 0,            # Freeze-D: Number of layers to freeze.
+        downsample = True
     ):
         assert in_channels in [0, tmp_channels]
         assert architecture in ['orig', 'skip', 'resnet']
@@ -550,11 +573,11 @@ class DiscriminatorBlock(torch.nn.Module):
         self.conv0 = Conv2dLayer(tmp_channels, tmp_channels, kernel_size=3, activation=activation,
             trainable=next(trainable_iter), conv_clamp=conv_clamp, channels_last=self.channels_last)
 
-        self.conv1 = Conv2dLayer(tmp_channels, out_channels, kernel_size=3, activation=activation, down=2,
+        self.conv1 = Conv2dLayer(tmp_channels, out_channels, kernel_size=3, activation=activation, down=2 if downsample else 1,
             trainable=next(trainable_iter), resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last)
 
         if architecture == 'resnet':
-            self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, down=2,
+            self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, down=2 if downsample else 1,
                 trainable=next(trainable_iter), resample_filter=resample_filter, channels_last=self.channels_last)
 
     def forward(self, x, img, force_fp32=False):
@@ -664,7 +687,7 @@ class DiscriminatorEpilogue(torch.nn.Module):
         x = self.out(x)
 
         # Conditioning.
-        if self.cmap_dim > 0:
+        if self.cmap_dim > 0 and cmap is not None:
             misc.assert_shape(cmap, [None, self.cmap_dim])
             x = (x * cmap).sum(dim=1, keepdim=True) * (1 / np.sqrt(self.cmap_dim))
 
@@ -688,6 +711,7 @@ class Discriminator(torch.nn.Module):
         block_kwargs        = {},       # Arguments for DiscriminatorBlock.
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
+        stop_training_at    = 0,        # Resolution below which grads will no longer be accumulated.
     ):
         super().__init__()
         self.c_dim = c_dim
@@ -695,6 +719,7 @@ class Discriminator(torch.nn.Module):
         self.img_resolution_log2 = int(np.log2(img_resolution))
         self.img_channels = img_channels
         self.block_resolutions = [2 ** i for i in range(self.img_resolution_log2, 2, -1)]
+        self.stop_training_at = stop_training_at
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
 
@@ -722,8 +747,14 @@ class Discriminator(torch.nn.Module):
         x = None
         for res in self.block_resolutions:
             block = getattr(self, f'b{res}')
+            if res < self.stop_training_at:
+                for p in block.parameters():
+                    p.requires_grad = False
             x, img = block(x, img, **block_kwargs)
 
+        if self.stop_training_at > 0:
+            for p in self.b4.parameters():
+                p.requires_grad = False
         cmap = None
         if self.c_dim > 0:
             cmap = self.mapping(None, c)

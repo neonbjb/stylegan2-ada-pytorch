@@ -21,11 +21,10 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G_mapping, G_synthesis, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2):
+    def __init__(self, device, G, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, G_lq_mse_weight=10):
         super().__init__()
         self.device = device
-        self.G_mapping = G_mapping
-        self.G_synthesis = G_synthesis
+        self.G = G
         self.D = D
         self.augment_pipe = augment_pipe
         self.style_mixing_prob = style_mixing_prob
@@ -34,8 +33,11 @@ class StyleGAN2Loss(Loss):
         self.pl_decay = pl_decay
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
+        self.g_lq_mse_weight = G_lq_mse_weight
 
-    def run_G(self, z, c, sync):
+    def run_G(self, z, c, lq, sync):
+        '''
+        # Glean does not do style mixing.
         with misc.ddp_sync(self.G_mapping, sync):
             ws = self.G_mapping(z, c)
             if self.style_mixing_prob > 0:
@@ -45,6 +47,9 @@ class StyleGAN2Loss(Loss):
                     ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
         with misc.ddp_sync(self.G_synthesis, sync):
             img = self.G_synthesis(ws)
+        '''
+        with misc.ddp_sync(self.G, sync):
+            img, ws = self.G(z, c, lq, return_ws=True)
         return img, ws
 
     def run_D(self, img, c, sync):
@@ -54,7 +59,7 @@ class StyleGAN2Loss(Loss):
             logits = self.D(img, c)
         return logits
 
-    def accumulate_gradients(self, phase, real_img, real_c, gen_z, gen_c, sync, gain):
+    def accumulate_gradients(self, phase, real_img, real_img_lq, real_c, gen_z, gen_c, sync, gain):
         assert phase in ['Gmain', 'Greg', 'Gboth', 'Dmain', 'Dreg', 'Dboth']
         do_Gmain = (phase in ['Gmain', 'Gboth'])
         do_Dmain = (phase in ['Dmain', 'Dboth'])
@@ -64,20 +69,26 @@ class StyleGAN2Loss(Loss):
         # Gmain: Maximize logits for generated images.
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=(sync and not do_Gpl)) # May get synced by Gpl.
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_img_lq, sync=(sync and not do_Gpl)) # May get synced by Gpl.
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
-                training_stats.report('Loss/G/loss', loss_Gmain)
+                training_stats.report('Loss/G/loss_gan', loss_Gmain)
+                loss_mse = torch.nn.functional.mse_loss(torch.nn.functional.interpolate(gen_img, size=real_img_lq.shape[2:], mode="area"),
+                                                        real_img_lq)
+                training_stats.report("Loss/G/loss_lq_mse", loss_mse)
+                loss_Gtotal = loss_Gmain + loss_mse * self.g_lq_mse_weight
+                training_stats.report("Loss/G/loss", loss_mse)
             with torch.autograd.profiler.record_function('Gmain_backward'):
-                loss_Gmain.mean().mul(gain).backward()
+                loss_Gtotal.mean().mul(gain).backward()
 
         # Gpl: Apply path length regularization.
+        ''' Disabled for GLEAN   TODO - re-evaluate this. It might actually be useful to compute path length across LR->HR
         if do_Gpl:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
-                gen_img, gen_ws = self.run_G(gen_z[:batch_size], gen_c[:batch_size], sync=sync)
+                gen_img, gen_ws = self.run_G(gen_z[:batch_size], gen_c[:batch_size], real_img_lq[:batch_size], sync=sync)
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
                     pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
@@ -90,12 +101,13 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Loss/G/reg', loss_Gpl)
             with torch.autograd.profiler.record_function('Gpl_backward'):
                 (gen_img[:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
+        '''
 
         # Dmain: Minimize logits for generated images.
         loss_Dgen = 0
         if do_Dmain:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, sync=False)
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_img_lq, sync=False)
                 gen_logits = self.run_D(gen_img, gen_c, sync=False) # Gets synced by loss_Dreal.
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
