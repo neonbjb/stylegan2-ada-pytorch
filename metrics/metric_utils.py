@@ -229,7 +229,7 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
         temp_file = cache_file + '.' + uuid.uuid4().hex
         lq_file = f'{cache_file}_lqs.pth'
         stats.save(temp_file)
-        torch.save(lq_file, all_lqs)
+        torch.save(all_lqs, lq_file)
         os.replace(temp_file, cache_file) # atomic
     return stats, all_lqs
 
