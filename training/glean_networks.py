@@ -140,10 +140,11 @@ class GleanGenerator(nn.Module):
         force_fp32 = opt_get(synthesis_kwargs, ['force_fp32'], False)
         layer_args = opt_get(block_args, ['layer_kwargs'], {})
 
-        # TODO: Optionally turn on grad.
-        with torch.no_grad():
-            ws = self.gen_bank.mapping(z, c, skip_trunc_and_broadcast=True)
+        # TODO: Optionally turn on grad for the mapping network or the synthesis network.
+        for p in self.gen_bank.parameters(recurse=True):
+            p.requires_grad = False
 
+        ws = self.gen_bank.mapping(z, c, skip_trunc_and_broadcast=True)
         conv_outs, latent = self.encoder(lq, **block_args)
         wse = self.enc_w_combiner(torch.cat([ws, latent], dim=-1))
         # `wse` is used for the encoder blocks, while `ws` is used for the decoder blocks.
@@ -189,9 +190,7 @@ class GleanGenerator(nn.Module):
 
                 # Generative bank
                 lws = cur_wse if did_enc else cur_ws
-                # TODO: Optionally turn on grad.
-                with torch.no_grad():
-                    x, img = synblock(x, img, lws, puppet=True, **block_args)
+                x, img = synblock(x, img, lws, puppet=True, **block_args)
 
                 # Decoder attachment
                 if res in self.dec_attachment_resolutions:

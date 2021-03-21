@@ -200,7 +200,7 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
 
         # Load.
         if flag:
-            return FeatureStats.load(cache_file)
+            return FeatureStats.load(cache_file), torch.load(f'{cache_file}_lqs.pth')
 
     # Initialize.
     num_items = len(dataset)
@@ -220,14 +220,17 @@ def compute_feature_stats_for_dataset(opts, detector_url, detector_kwargs, rel_l
         features = detector(images.to(opts.device), **detector_kwargs)
         stats.append_torch(features, num_gpus=opts.num_gpus, rank=opts.rank)
         progress.update(stats.num_items)
+    all_lqs = torch.cat(all_lqs, dim=0)
 
     # Save to cache.
     if cache_file is not None and opts.rank == 0:
         os.makedirs(os.path.dirname(cache_file), exist_ok=True)
         temp_file = cache_file + '.' + uuid.uuid4().hex
+        lq_file = f'{cache_file}_lqs.pth'
         stats.save(temp_file)
+        torch.save(lq_file, all_lqs)
         os.replace(temp_file, cache_file) # atomic
-    return stats, torch.cat(all_lqs, dim=0)
+    return stats, all_lqs
 
 #----------------------------------------------------------------------------
 
@@ -242,7 +245,7 @@ def compute_feature_stats_for_generator(lqs, opts, detector_url, detector_kwargs
 
     # Image generation func.
     def run_generator(z, c, lqs):
-        img = G(z=z, c=c, lqs=lqs, **opts.G_kwargs)
+        img = G(z=z, c=c, lq=lqs, **opts.G_kwargs)
         img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
         return img
 
@@ -257,16 +260,18 @@ def compute_feature_stats_for_generator(lqs, opts, detector_url, detector_kwargs
     assert stats.max_items is not None
     progress = opts.progress.sub(tag='generator features', num_items=stats.max_items, rel_lo=rel_lo, rel_hi=rel_hi)
     detector = get_feature_detector(url=detector_url, device=opts.device, num_gpus=opts.num_gpus, rank=opts.rank, verbose=progress.verbose)
-    batched_lqs = (lqs / 127.5 - 1).to(opts.device).split(batch_size)
+    batched_lqs = (lqs / 127.5 - 1).to(opts.device).split(batch_gen)
 
     # Main loop.
+    lq_ind = 0
     while not stats.is_full():
         images = []
         for _i in range(batch_size // batch_gen):
             z = torch.randn([batch_gen, G.gen_bank.z_dim], device=opts.device)
             c = [dataset.get_label(np.random.randint(len(dataset))) for _i in range(batch_gen)]
             c = torch.from_numpy(np.stack(c)).pin_memory().to(opts.device)
-            images.append(run_generator(z, c, batched_lqs[_i]))
+            images.append(run_generator(z, c, batched_lqs[lq_ind]))
+            lq_ind += 1
         images = torch.cat(images)
         if images.shape[1] == 1:
             images = images.repeat([1, 3, 1, 1])
