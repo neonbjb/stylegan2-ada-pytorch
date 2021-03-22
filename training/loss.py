@@ -79,7 +79,7 @@ class StyleGAN2Loss(Loss):
                                                         real_img_lq)
                 training_stats.report("Loss/G/loss_lq_mse", loss_mse)
                 loss_Gtotal = loss_Gmain + loss_mse * self.g_lq_mse_weight
-                training_stats.report("Loss/G/loss", loss_mse)
+                training_stats.report("Loss/G/loss", loss_Gtotal)
             with torch.autograd.profiler.record_function('Gmain_backward'):
                 loss_Gtotal.mean().mul(gain).backward()
 

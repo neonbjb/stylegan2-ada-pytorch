@@ -380,6 +380,13 @@ def training_loop(
             images = torch.cat([G_ema(z=z, c=c, lq=lq, noise_mode='const').cpu() for z, c, lq in zip(grid_z, grid_c, grid_lq)]).numpy()
             save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
 
+        # Save debugging images. Done frequently, every 5 ticks.
+        if (rank == 0) and (image_snapshot_ticks is not None) and (cur_tick % 5 == 0):
+            dbg_ind = (cur_tick / 5) % 5  # Uses a rotating buffer so as to not produce a shitload of images.
+            with torch.no_grad():
+                images = torch.cat([G(z=z, c=c, lq=lq, noise_mode='const').cpu() for z, c, lq in zip(grid_z, grid_c, grid_lq)]).numpy()
+            save_image_grid(images, os.path.join(run_dir, f'debug_image_{dbg_ind}.png'), drange=[-1,1], grid_size=grid_size)
+
         # Save network snapshot.
         snapshot_pkl = None
         snapshot_data = None
