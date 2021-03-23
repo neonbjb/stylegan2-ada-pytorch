@@ -86,21 +86,22 @@ class GleanGenerator(nn.Module):
         img_resolution,             # Output resolution.
         img_channels,               # Number of output color channels.
         enc_input_resolution,
+        freeze_latent_dict = True,  # Whether or not the latent dict should be trained.
+        freeze_mapping_network = True,
         mapping_kwargs      = {},   # Arguments for MappingNetwork.
         synthesis_kwargs    = {},   # Arguments for SynthesisNetwork.
         enc_block_kwargs    = {},
         enc_epilogue_kwargs = {}
     ):
         super().__init__()
+        self.freeze_latent_dict = freeze_latent_dict
+        self.freeze_mapping_network = freeze_mapping_network
         channel_base = opt_get(synthesis_kwargs, ['channel_base'], 32768)
         channel_max = opt_get(synthesis_kwargs, ['channel_max'], 512)
         self.encoder = GleanEncoder(c_dim, enc_input_resolution, img_channels, channel_base=channel_base,
                                     channel_max=channel_max, block_kwargs=enc_block_kwargs,
                                     epilogue_kwargs=enc_epilogue_kwargs)
         self.gen_bank = Generator(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs, synthesis_kwargs)
-        for p in self.gen_bank.parameters():
-            p.requires_grad = True
-        self.gen_bank.eval()
 
         # Generative bank attachments.
         conv_clamp = opt_get(synthesis_kwargs, ['block_kwargs', 'conv_clamp'], None)
@@ -141,8 +142,14 @@ class GleanGenerator(nn.Module):
         layer_args = opt_get(block_args, ['layer_kwargs'], {})
 
         # TODO: Optionally turn on grad for the mapping network or the synthesis network.
-        for p in self.gen_bank.parameters(recurse=True):
-            p.requires_grad = False
+        if self.freeze_latent_dict:
+            for p in self.gen_bank.synthesis.parameters():
+                p.requires_grad = False
+            self.gen_bank.synthesis.eval()
+        if self.freeze_mapping_network:
+            for p in self.gen_bank.mapping.parameters():
+                p.requires_grad = False
+            self.gen_bank.mapping.eval()
 
         ws = self.gen_bank.mapping(z, c, skip_trunc_and_broadcast=True)
         conv_outs, latent = self.encoder(lq, **block_args)

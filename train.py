@@ -68,6 +68,9 @@ def setup_training_loop_kwargs(
     switched_conv_breadth = None,
     ref_gpus = -1, # When using config='auto', this specifies how much batch accumulation you want to do. ref_gpus=2 means 2 forward passes per batch, for example.
     glean_scale_factor = 8,
+    stop_discriminator_gradients_at_glean = True,
+    stop_synthesis_gradients_at_glean = True,
+    stop_mapping_gradients_at_glean = True,
 ):
     args = dnnlib.EasyDict()
     args.switched_conv_breadth = switched_conv_breadth
@@ -184,8 +187,13 @@ def setup_training_loop_kwargs(
         spec.ema = spec.mb * 10 / 32
 
     glean_res = args.training_set_kwargs.resolution//glean_scale_factor
-    args.G_kwargs = dnnlib.EasyDict(class_name='training.glean_networks.GleanGenerator', z_dim=512, w_dim=512, enc_input_resolution=glean_res, mapping_kwargs=dnnlib.EasyDict(), synthesis_kwargs=dnnlib.EasyDict())
-    args.D_kwargs = dnnlib.EasyDict(class_name='training.networks.Discriminator', block_kwargs=dnnlib.EasyDict(), stop_training_at=glean_res, mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
+    args.G_kwargs = dnnlib.EasyDict(class_name='training.glean_networks.GleanGenerator', z_dim=512, w_dim=512, enc_input_resolution=glean_res,
+                                    freeze_latent_dict=stop_synthesis_gradients_at_glean, freeze_mapping_network=stop_mapping_gradients_at_glean,
+                                    mapping_kwargs=dnnlib.EasyDict(), synthesis_kwargs=dnnlib.EasyDict())
+    disc_stop_training_at = glean_res if stop_discriminator_gradients_at_glean else 0
+    args.D_kwargs = dnnlib.EasyDict(class_name='training.networks.Discriminator', block_kwargs=dnnlib.EasyDict(),
+                                    stop_training_at=disc_stop_training_at, mapping_kwargs=dnnlib.EasyDict(),
+                                    epilogue_kwargs=dnnlib.EasyDict())
     args.G_kwargs.synthesis_kwargs.channel_base = args.D_kwargs.channel_base = int(spec.fmaps * 32768)
     args.G_kwargs.synthesis_kwargs.channel_max = args.D_kwargs.channel_max = 512
     args.G_kwargs.mapping_kwargs.num_layers = spec.map
@@ -453,6 +461,17 @@ class CommaSeparatedList(click.ParamType):
 
 # GLEAN
 @click.option('--glean_scale_factor', help='GLEAN upsampling factor', type=int, default=8, metavar='INT')
+# These stop gradients should all be set to true when initially training the network using a pretrained
+# "Generative bank". You can optionally set them to true later on once training has stabilized.
+@click.option('--stop_discriminator_gradients_at_glean',
+              help='Whether or not to stop the low res discriminator parameters from being trained',
+              type=bool, default=True, metavar='BOOL')
+@click.option('--stop_synthesis_gradients_at_glean',
+              help='Whether or not to stop the generator\'s synthesis network parameters from being trained',
+              type=bool, default=True, metavar='BOOL')
+@click.option('--stop_mapping_gradients_at_glean',
+              help='Whether or not to stop the generator\'s mapping network parameters from being trained',
+              type=bool, default=True, metavar='BOOL')
 
 def main(ctx, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper
