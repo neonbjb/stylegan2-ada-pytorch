@@ -84,6 +84,7 @@ class StyleGAN2Loss(Loss):
                 loss_Gtotal.mean().mul(gain).backward()
 
         # Gpl: Apply path length regularization.
+        ''' Disabled for GLEAN   TODO - re-evaluate this. It might actually be useful to compute path length across LR->HR
         if do_Gpl:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
@@ -100,6 +101,7 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Loss/G/reg', loss_Gpl)
             with torch.autograd.profiler.record_function('Gpl_backward'):
                 (gen_img[:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
+        '''
 
         # Dmain: Minimize logits for generated images.
         loss_Dgen = 0
