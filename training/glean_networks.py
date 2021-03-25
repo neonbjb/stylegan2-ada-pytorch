@@ -163,7 +163,7 @@ class GleanGenerator(nn.Module):
         if wse is None:
             wse = ws
         # `wse` is used for the encoder blocks, while `ws` is used for the decoder blocks.
-        enc_split_ind = (self.enc_input_resolution_log2-3)*2
+        enc_split_ind = (self.enc_input_resolution_log2-1)*2  # TODO: This should be "-2", fix me.
         ws = torch.cat([wse[:, :enc_split_ind, :], ws[:, enc_split_ind:, :]], dim=1)
         return ws
 
@@ -171,7 +171,7 @@ class GleanGenerator(nn.Module):
     def do_latent_mapping_with_mixing(self, z, enc_latent, mixing_prob, truncation_psi=1, truncation_cutoff=None):
         ws = self.do_latent_mapping_for_single(z, enc_latent, truncation_psi, truncation_cutoff)
         if mixing_prob > 0:
-            enc_split_ind = (self.enc_input_resolution_log2-3)*2
+            enc_split_ind = (self.enc_input_resolution_log2-1)*2  # TODO: This should be "-2", fix me.
             cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(enc_split_ind + 1, ws.shape[1])
             cutoff = torch.where(torch.rand([], device=ws.device) < mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
             ws[:, cutoff:] = self.do_latent_mapping_for_single(torch.randn_like(z), enc_latent=None,
@@ -238,7 +238,7 @@ class GleanGenerator(nn.Module):
                     x = torch.cat([x, conv_outs[eres].to(dtype=dtype, memory_format=memory_format)], dim=1)
                     # x = torch.cat([x, conv_outs[eres]], dim=1)
                     layer = getattr(self, f'enc_attachment_{eres}')
-                    enc_w = cur_ws[:, 0, :]  # Just use the first block's w for the encoder attachment.
+                    enc_w = cur_ws[:,0,:]  # Just use the first block's w for the encoder attachment.
                     x = layer(x, enc_w, **layer_args)
 
                 # Generative bank
@@ -252,7 +252,7 @@ class GleanGenerator(nn.Module):
 
         with misc.suppress_tracer_warnings():  # this value will be treated as a constant
             fused_modconv = (not self.training) and (dtype == torch.float32 or int(x.shape[0]) == 1)
-        y = self.dec_torgb(x, cur_ws[:, 1, :], fused_modconv=fused_modconv)
+        y = self.dec_torgb(x, ws[:,-1,:], fused_modconv=fused_modconv)
         y = y.to(dtype=torch.float32, memory_format=torch.contiguous_format)
         img = img.add_(y)
         if return_ws:
