@@ -36,20 +36,10 @@ class StyleGAN2Loss(Loss):
         self.g_lq_mse_weight = G_lq_mse_weight
 
     def run_G(self, z, c, lq, sync):
-        '''
-        # Glean does not do style mixing.
-        with misc.ddp_sync(self.G_mapping, sync):
-            ws = self.G_mapping(z, c)
-            if self.style_mixing_prob > 0:
-                with torch.autograd.profiler.record_function('style_mixing'):
-                    cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
-                    cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
-                    ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
-        with misc.ddp_sync(self.G_synthesis, sync):
-            img = self.G_synthesis(ws)
-        '''
         with misc.ddp_sync(self.G, sync):
-            img, ws = self.G(z, c, lq, return_ws=True)
+            enc_c, enc_l = self.G.do_encoder(lq=lq)
+            ws = self.G.do_latent_mapping_with_mixing(z=z, enc_latent=enc_l, mixing_prob=self.style_mixing_prob)
+            img = self.G(ws=ws, enc_conv_outs=enc_c)
         return img, ws
 
     def run_D(self, img, c, sync):
@@ -84,7 +74,6 @@ class StyleGAN2Loss(Loss):
                 loss_Gtotal.mean().mul(gain).backward()
 
         # Gpl: Apply path length regularization.
-        ''' Disabled for GLEAN   TODO - re-evaluate this. It might actually be useful to compute path length across LR->HR
         if do_Gpl:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
@@ -101,7 +90,6 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Loss/G/reg', loss_Gpl)
             with torch.autograd.profiler.record_function('Gpl_backward'):
                 (gen_img[:, 0, 0, 0] * 0 + loss_Gpl).mean().mul(gain).backward()
-        '''
 
         # Dmain: Minimize logits for generated images.
         loss_Dgen = 0
