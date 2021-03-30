@@ -5,6 +5,7 @@
 # and any modifications thereto.  Any use, reproduction, disclosure or
 # distribution of this software and related documentation without an express
 # license agreement from NVIDIA CORPORATION is strictly prohibited.
+import random
 
 import numpy as np
 import torch
@@ -45,12 +46,13 @@ class StyleGAN2Loss(Loss):
                     cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
                     ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
         outputs = []
+        if self.output_images > 1:
+            ws3 = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:,:,:256]
         for j in range(self.output_images):
             if j > 0:
                 # Alter ws by "nudging" a portion of it in a random small direction. The desired result is a small change in pose of the image.
-                PATH_EPS = 1e-3
-                nudge_ws = ws[:,:,:256]
-                nudge_ws = nudge_ws + torch.rand((1,1,nudge_ws.shape[-1]),device=nudge_ws.device,dtype=nudge_ws.dtype) * PATH_EPS
+                path_eps = random.uniform(1e-3,1e-4)
+                nudge_ws = ws[:,:,:256].lerp(ws3, path_eps)
                 lw = torch.cat([nudge_ws, ws[:,:,256:]], dim=-1)
             else:
                 lw = ws
