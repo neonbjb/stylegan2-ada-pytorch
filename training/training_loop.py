@@ -83,11 +83,14 @@ def save_image_grid(img, fname, drange, grid_size):
 
     gw, gh = grid_size
     _N, C, H, W = img.shape
+    if C > 3:
+        separate_imgs = C // 3
+        img = np.concatenate([img[:,i*3:(i+1)*3,:,:] for i in range(separate_imgs)], axis=-1)
+        _N, C, H, W = img.shape
     img = img.reshape(gh, gw, C, H, W)
     img = img.transpose(0, 3, 1, 4, 2)
     img = img.reshape(gh * H, gw * W, C)
 
-    assert C in [1, 3]
     if C == 1:
         PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
     if C == 3:
@@ -157,7 +160,7 @@ def training_loop(
     # Construct networks.
     if rank == 0:
         print('Constructing networks...')
-    common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=training_set.resolution, img_channels=training_set.num_channels)
+    common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=training_set.resolution)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
@@ -190,6 +193,7 @@ def training_loop(
         z = torch.empty([batch_gpu, G.z_dim], device=device)
         c = torch.empty([batch_gpu, G.c_dim], device=device)
         img = misc.print_module_summary(G, [z, c])
+        img = torch.zeros((img.shape[0], D.img_channels, img.shape[2], img.shape[3]), device=img.device, dtype=img.dtype)
         misc.print_module_summary(D, [img, c])
 
     # Setup augmentation.
@@ -247,6 +251,7 @@ def training_loop(
     grid_size = None
     grid_z = None
     grid_c = None
+    grid_gen_produce_n = 1
     with torch.no_grad():
         if rank == 0:
             print('Exporting sample images...')
@@ -254,7 +259,8 @@ def training_loop(
             save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
             grid_z = torch.randn([labels.shape[0], G.z_dim], device=device).split(batch_gpu)
             grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+            grid_gen_produce_n = images.shape[1]//3
+            images = torch.cat([G_ema(z=z, c=c, noise_mode='const', produce_n=grid_gen_produce_n).cpu() for z, c in zip(grid_z, grid_c)]).numpy()
             save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
 
     # Initialize logs.
@@ -380,7 +386,7 @@ def training_loop(
 
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-            images = torch.cat([G_ema(z=z, c=c, noise_mode='const').cpu() for z, c in zip(grid_z, grid_c)]).numpy()
+            images = torch.cat([G_ema(z=z, c=c, noise_mode='const', produce_n=grid_gen_produce_n).cpu() for z, c in zip(grid_z, grid_c)]).numpy()
             save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
 
         # Save network snapshot.

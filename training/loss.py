@@ -21,7 +21,7 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G_mapping, G_synthesis, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2):
+    def __init__(self, device, G_mapping, G_synthesis, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, output_images=1):
         super().__init__()
         self.device = device
         self.G_mapping = G_mapping
@@ -34,6 +34,7 @@ class StyleGAN2Loss(Loss):
         self.pl_decay = pl_decay
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
+        self.output_images = output_images
 
     def run_G(self, z, c, sync):
         with misc.ddp_sync(self.G_mapping, sync):
@@ -43,9 +44,19 @@ class StyleGAN2Loss(Loss):
                     cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                     cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
                     ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
-        with misc.ddp_sync(self.G_synthesis, sync):
-            img = self.G_synthesis(ws)
-        return img, ws
+        outputs = []
+        for j in range(self.output_images):
+            if j > 0:
+                # Alter ws by "nudging" a portion of it in a random small direction. The desired result is a small change in pose of the image.
+                PATH_EPS = 1e-3
+                nudge_ws = ws[:,:,:256]
+                nudge_ws = nudge_ws + torch.rand((1,1,nudge_ws.shape[-1]),device=nudge_ws.device,dtype=nudge_ws.dtype) * PATH_EPS
+                lw = torch.cat([nudge_ws, ws[:,:,256:]], dim=-1)
+            else:
+                lw = ws
+            with misc.ddp_sync(self.G_synthesis, sync):
+                outputs.append(self.G_synthesis(lw))
+        return torch.cat(outputs, dim=1), ws
 
     def run_D(self, img, c, sync):
         if self.augment_pipe is not None:

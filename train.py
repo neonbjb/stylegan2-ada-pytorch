@@ -67,6 +67,7 @@ def setup_training_loop_kwargs(
 
     switched_conv_breadth = None,
     ref_gpus = -1, # When using config='auto', this specifies how much batch accumulation you want to do. ref_gpus=2 means 2 forward passes per batch, for example.
+    input_images = 1,
 ):
     args = dnnlib.EasyDict()
     args.switched_conv_breadth = switched_conv_breadth
@@ -115,6 +116,7 @@ def setup_training_loop_kwargs(
         args.training_set_kwargs.resolution = training_set.resolution # be explicit about resolution
         args.training_set_kwargs.use_labels = training_set.has_labels # be explicit about labels
         args.training_set_kwargs.max_size = len(training_set) # be explicit about dataset size
+        args.training_set_kwargs.input_images = input_images
         desc = training_set.name
         del training_set # conserve memory
     except IOError as err:
@@ -180,6 +182,7 @@ def setup_training_loop_kwargs(
         spec.gamma = 0.0002 * (res ** 2) / spec.mb # heuristic formula
         spec.ema = spec.mb * 10 / 32
 
+    channels_in = 3 * input_images
     args.G_kwargs = dnnlib.EasyDict(class_name='training.networks.Generator', z_dim=512, w_dim=512, mapping_kwargs=dnnlib.EasyDict(), synthesis_kwargs=dnnlib.EasyDict())
     args.D_kwargs = dnnlib.EasyDict(class_name='training.networks.Discriminator', block_kwargs=dnnlib.EasyDict(), mapping_kwargs=dnnlib.EasyDict(), epilogue_kwargs=dnnlib.EasyDict())
     args.G_kwargs.synthesis_kwargs.channel_base = args.D_kwargs.channel_base = int(spec.fmaps * 32768)
@@ -188,6 +191,7 @@ def setup_training_loop_kwargs(
     args.G_kwargs.synthesis_kwargs.num_fp16_res = args.D_kwargs.num_fp16_res = 4 # enable mixed-precision training
     args.G_kwargs.synthesis_kwargs.conv_clamp = args.D_kwargs.conv_clamp = 256 # clamp activations to avoid float16 overflow
     args.D_kwargs.epilogue_kwargs.mbstd_group_size = spec.mbstd
+    args.D_kwargs.img_channels = channels_in
 
     args.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0,0.99], eps=1e-8)
     args.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0,0.99], eps=1e-8)
@@ -198,6 +202,8 @@ def setup_training_loop_kwargs(
     args.batch_gpu = spec.mb // spec.ref_gpus
     args.ema_kimg = spec.ema
     args.ema_rampup = spec.ramp
+
+    args.loss_kwargs.output_images = input_images
 
     if cfg == 'cifar':
         args.loss_kwargs.pl_weight = 0 # disable path length regularization
@@ -444,7 +450,8 @@ class CommaSeparatedList(click.ParamType):
 
 # Extras
 @click.option('--switched_conv_breadth', help='When specified, converts network to switched_conv mode with the specified breadth', type=int, metavar='INT')
-@click.option('--ref_gpus', help='Specifies batch accumulation via "virtual" gpus', type=int, metavar='INT')
+@click.option('--ref_gpus', help='Specifies batch accumulation via "virtual" gpus', type=int, metavar='INT', default=1)
+@click.option('--input_images', help='Number of images per input image, tiled along the width dimension.', type=int, default=1)
 
 def main(ctx, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper

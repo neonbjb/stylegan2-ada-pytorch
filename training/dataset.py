@@ -29,12 +29,14 @@ class Dataset(torch.utils.data.Dataset):
         use_labels  = False,    # Enable conditioning labels? False = label dimension is zero.
         xflip       = False,    # Artificially double the size of the dataset via x-flips. Applied after max_size.
         random_seed = 0,        # Random seed to use when applying max_size.
+        input_images = 1,
     ):
         self._name = name
         self._raw_shape = list(raw_shape)
         self._use_labels = use_labels
         self._raw_labels = None
         self._label_shape = None
+        self._input_images = input_images
 
         # Apply max_size.
         self._raw_idx = np.arange(self._raw_shape[0], dtype=np.int64)
@@ -90,6 +92,13 @@ class Dataset(torch.utils.data.Dataset):
         if self._xflip[idx]:
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
+        c,h,w = image.shape
+        # when given two images catted side by side in the width dimension, cat them across the channel dimension instead.
+        if w > h:
+            ims = []
+            for j in range(self._input_images):
+                ims.append(image[:,:,j*h:(j+1)*h])
+            image = np.concatenate(ims, 0)
         return image.copy(), self.get_label(idx)
 
     def get_label(self, idx):
@@ -123,7 +132,7 @@ class Dataset(torch.utils.data.Dataset):
     @property
     def resolution(self):
         assert len(self.image_shape) == 3 # CHW
-        assert self.image_shape[1] == self.image_shape[2]
+        assert self.image_shape[1] <= self.image_shape[2] * self._input_images
         return self.image_shape[1]
 
     @property
@@ -176,7 +185,7 @@ class ImageFolderDataset(Dataset):
 
         name = os.path.splitext(os.path.basename(self._path))[0]
         raw_shape = [len(self._image_fnames)] + list(self._load_raw_image(0).shape)
-        if resolution is not None and (raw_shape[2] != resolution or raw_shape[3] != resolution):
+        if resolution is not None and (raw_shape[2] != resolution):
             raise IOError('Image files do not match the specified resolution')
         super().__init__(name=name, raw_shape=raw_shape, **super_kwargs)
 

@@ -484,7 +484,7 @@ class Generator(torch.nn.Module):
         c_dim,                      # Conditioning label (C) dimensionality.
         w_dim,                      # Intermediate latent (W) dimensionality.
         img_resolution,             # Output resolution.
-        img_channels,               # Number of output color channels.
+        img_channels = 3,           # Number of output color channels.
         mapping_kwargs      = {},   # Arguments for MappingNetwork.
         synthesis_kwargs    = {},   # Arguments for SynthesisNetwork.
     ):
@@ -498,10 +498,21 @@ class Generator(torch.nn.Module):
         self.num_ws = self.synthesis.num_ws
         self.mapping = MappingNetwork(z_dim=z_dim, c_dim=c_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
 
-    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
+
+    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, produce_n=1, **synthesis_kwargs):
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
-        img = self.synthesis(ws, **synthesis_kwargs)
-        return img
+        imgs = []
+        for j in range(produce_n):
+            if j > 0:
+                # Alter ws by "nudging" a portion of it in a random small direction. The desired result is a small change in pose of the image.
+                PATH_EPS = 1e-3
+                nudge_ws = ws[:,:,:256]
+                nudge_ws = nudge_ws + torch.rand((1,1,nudge_ws.shape[-1]),device=nudge_ws.device,dtype=nudge_ws.dtype) * PATH_EPS
+                lw = torch.cat([nudge_ws, ws[:,:,256:]], dim=-1)
+            else:
+                lw = ws
+            imgs.append(self.synthesis(lw, **synthesis_kwargs))
+        return torch.cat(imgs, dim=1)
 
 #----------------------------------------------------------------------------
 
