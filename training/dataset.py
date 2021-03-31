@@ -93,7 +93,7 @@ class Dataset(torch.utils.data.Dataset):
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
         if self._lq_scale > 1:
-            lq = torch.nn.functional.interpolate(torch.from_numpy(image).float().unsqueeze(0), scale_factor=1/self._lq_scale, mode="area").squeeze(0).numpy()
+            lq = torch.nn.functional.interpolate(torch.from_numpy(image).float().unsqueeze(0), scale_factor=1/self._lq_scale, mode="bilinear", align_corners=False).squeeze(0).numpy()
         return image.copy(), lq.copy(), self.get_label(idx)
 
     def get_label(self, idx):

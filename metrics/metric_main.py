@@ -87,6 +87,7 @@ def fid10k_full(opts):
 
 @register_metric
 def ppl2_wend_10k(opts):
+    opts.dataset_kwargs.update(max_size=None, xflip=False)
     ppl = perceptual_path_length.compute_ppl(opts, num_samples=10000, epsilon=1e-4, space='w', sampling='end', crop=False, batch_size=2)
     return dict(ppl2_wend=ppl)
 

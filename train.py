@@ -112,7 +112,7 @@ def setup_training_loop_kwargs(
 
     assert data is not None
     assert isinstance(data, str)
-    args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True, max_size=None, xflip=False)
+    args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data, use_labels=True, max_size=None, xflip=False, lq_scale=glean_scale_factor)
     args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=3, prefetch_factor=2)
     try:
         training_set = dnnlib.util.construct_class_by_name(**args.training_set_kwargs) # subclass of training.dataset.Dataset
@@ -187,7 +187,7 @@ def setup_training_loop_kwargs(
         spec.ema = spec.mb * 10 / 32
 
     glean_res = args.training_set_kwargs.resolution//glean_scale_factor
-    args.G_kwargs = dnnlib.EasyDict(class_name='training.glean_networks.GleanGenerator', z_dim=512, w_dim=512, enc_input_resolution=glean_res,
+    args.G_kwargs = dnnlib.EasyDict(class_name='training.gan_sr.SrGenerator', z_dim=512, w_dim=512, enc_input_resolution=glean_res,
                                     freeze_latent_dict=stop_synthesis_gradients_at_glean, freeze_mapping_network=stop_mapping_gradients_at_glean,
                                     mapping_kwargs=dnnlib.EasyDict(), synthesis_kwargs=dnnlib.EasyDict())
     disc_stop_training_at = glean_res if stop_discriminator_gradients_at_glean else 0
@@ -457,7 +457,7 @@ class CommaSeparatedList(click.ParamType):
 
 # Extras
 @click.option('--switched_conv_breadth', help='When specified, converts network to switched_conv mode with the specified breadth', type=int, metavar='INT')
-@click.option('--ref_gpus', help='Specifies batch accumulation via "virtual" gpus', type=int, metavar='INT')
+@click.option('--ref_gpus', help='Specifies batch accumulation via "virtual" gpus', type=int, metavar='INT', default=1)
 
 # GLEAN
 @click.option('--glean_scale_factor', help='GLEAN upsampling factor', type=int, default=8, metavar='INT')

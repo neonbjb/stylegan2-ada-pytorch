@@ -36,42 +36,47 @@ def slerp(a, b, t):
 #----------------------------------------------------------------------------
 
 class PPLSampler(torch.nn.Module):
-    def __init__(self, G, G_kwargs, epsilon, space, sampling, crop, vgg16):
+    def __init__(self, G, G_kwargs, epsilon, space, sampling, crop, vgg16, dataset_kwargs):
         assert space in ['z', 'w']
         assert sampling in ['full', 'end']
         super().__init__()
         self.G = copy.deepcopy(G)
         self.G_kwargs = G_kwargs
+        self.from_layer = G.enc_input_resolution_log2+1
         self.epsilon = epsilon
         self.space = space
         self.sampling = sampling
         self.crop = crop
         self.vgg16 = copy.deepcopy(vgg16)
-        dataset = dnnlib.util.construct_class_by_name(dataset_kwargs)
-        self.dataloader = DataLoader(dataset=dataset, batch_size=batch_size, pin_memory=True, num_workers=2, prefetch_factor=2)
+        dataset = dnnlib.util.construct_class_by_name(**dataset_kwargs)
+        # TODO: specify batch_size properly.
+        self.dataloader = DataLoader(dataset=dataset, batch_size=2, pin_memory=True, num_workers=2, prefetch_factor=2)
+        self.dliter = iter(self.dataloader)
 
     def forward(self, c):
         # Fetch bs lq images
-        bs = c.shape[0]
+        bs = c.shape[0]  # Note: c is otherwise unused.
         lq = torch.empty((0,))
         while lq.shape[0] < bs:
-            ims, lqs, lbls = next(self.dataloader)
-            lq = lq.cat([lqs, lq], dim=0)
+            ims, lqs, lbls = next(self.dliter)
+            lq = torch.cat([lqs, lq], dim=0).to(c.device)
+        enc_conv, enc_latent = self.G.do_encoder(lq, force_fp32=True, **self.G_kwargs)
 
         # Generate random latents and interpolation t-values.
         t = torch.rand([c.shape[0]], device=c.device) * (1 if self.sampling == 'full' else 0)
-        z0, z1 = torch.randn([c.shape[0] * 2, self.G.z_dim], device=c.device).chunk(2)
+        z0, z1 = torch.randn([c.shape[0] * 2, self.G.gen_bank.z_dim], device=c.device).chunk(2)
 
         # Interpolate in W or Z.
-        FIXME
         if self.space == 'w':
-            w0, w1 = self.G.mapping(z=torch.cat([z0,z1]), c=torch.cat([c,c])).chunk(2)
+            w0 = self.G.do_latent_mapping_for_single(z0, enc_latent)
+            w1 = self.G.do_latent_mapping_for_single(z1, enc_latent)
             wt0 = w0.lerp(w1, t.unsqueeze(1).unsqueeze(2))
             wt1 = w0.lerp(w1, t.unsqueeze(1).unsqueeze(2) + self.epsilon)
         else: # space == 'z'
             zt0 = slerp(z0, z1, t.unsqueeze(1))
             zt1 = slerp(z0, z1, t.unsqueeze(1) + self.epsilon)
-            wt0, wt1 = self.G.mapping(z=torch.cat([zt0,zt1]), c=torch.cat([c,c])).chunk(2)
+            wt0 = self.G.do_latent_mapping_for_single(zt0, enc_latent)
+            wt1 = self.G.do_latent_mapping_for_single(zt1, enc_latent)
 
         # Randomize noise buffers.
         for name, buf in self.G.named_buffers():
@@ -79,7 +84,8 @@ class PPLSampler(torch.nn.Module):
                 buf.copy_(torch.randn_like(buf))
 
         # Generate images.
-        img = self.G.synthesis(ws=torch.cat([wt0,wt1]), noise_mode='const', force_fp32=True, **self.G_kwargs)
+        enc_conv = {k:v.repeat(2,1,1,1) for k,v in enc_conv.items()}
+        img = self.G(ws=torch.cat([wt0,wt1]), enc_conv_outs=enc_conv, force_fp32=True, noise_mode='const', **self.G_kwargs)
 
         # Center crop.
         if self.crop:
@@ -110,7 +116,7 @@ def compute_ppl(opts, num_samples, epsilon, space, sampling, crop, batch_size, j
     vgg16 = metric_utils.get_feature_detector(vgg16_url, num_gpus=opts.num_gpus, rank=opts.rank, verbose=opts.progress.verbose)
 
     # Setup sampler.
-    sampler = PPLSampler(G=opts.G, G_kwargs=opts.G_kwargs, epsilon=epsilon, space=space, sampling=sampling, crop=crop, vgg16=vgg16)
+    sampler = PPLSampler(G=opts.G, G_kwargs=opts.G_kwargs, epsilon=epsilon, space=space, sampling=sampling, crop=crop, vgg16=vgg16, dataset_kwargs=opts.dataset_kwargs)
     sampler.eval().requires_grad_(False).to(opts.device)
     if jit:
         c = torch.zeros([batch_size, opts.G.c_dim], device=opts.device)
