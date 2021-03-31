@@ -86,6 +86,11 @@ def fid10k_full(opts):
     return dict(fid50k_full=fid)
 
 @register_metric
+def ppl2_wend_10k(opts):
+    ppl = perceptual_path_length.compute_ppl(opts, num_samples=10000, epsilon=1e-4, space='w', sampling='end', crop=False, batch_size=2)
+    return dict(ppl2_wend=ppl)
+
+@register_metric
 def fid50k_full(opts):
     opts.dataset_kwargs.update(max_size=None, xflip=False)
     fid = frechet_inception_distance.compute_fid(opts, max_real=None, num_gen=50000)

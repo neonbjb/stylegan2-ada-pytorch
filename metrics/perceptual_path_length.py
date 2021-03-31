@@ -14,6 +14,8 @@ https://github.com/NVlabs/stylegan/blob/master/metrics/perceptual_path_length.py
 import copy
 import numpy as np
 import torch
+from torch.utils.data import DataLoader
+
 import dnnlib
 from . import metric_utils
 
@@ -45,13 +47,23 @@ class PPLSampler(torch.nn.Module):
         self.sampling = sampling
         self.crop = crop
         self.vgg16 = copy.deepcopy(vgg16)
+        dataset = dnnlib.util.construct_class_by_name(dataset_kwargs)
+        self.dataloader = DataLoader(dataset=dataset, batch_size=batch_size, pin_memory=True, num_workers=2, prefetch_factor=2)
 
     def forward(self, c):
+        # Fetch bs lq images
+        bs = c.shape[0]
+        lq = torch.empty((0,))
+        while lq.shape[0] < bs:
+            ims, lqs, lbls = next(self.dataloader)
+            lq = lq.cat([lqs, lq], dim=0)
+
         # Generate random latents and interpolation t-values.
         t = torch.rand([c.shape[0]], device=c.device) * (1 if self.sampling == 'full' else 0)
         z0, z1 = torch.randn([c.shape[0] * 2, self.G.z_dim], device=c.device).chunk(2)
 
         # Interpolate in W or Z.
+        FIXME
         if self.space == 'w':
             w0, w1 = self.G.mapping(z=torch.cat([z0,z1]), c=torch.cat([c,c])).chunk(2)
             wt0 = w0.lerp(w1, t.unsqueeze(1).unsqueeze(2))
