@@ -193,6 +193,9 @@ class MappingNetwork(torch.nn.Module):
         self.num_layers = num_layers
         self.w_avg_beta = w_avg_beta
 
+        # Both dimensions are split in half to feed the separated pose & style mapping networks.
+        z_dim = z_dim // 2
+        w_dim = w_dim // 2
         if embed_features is None:
             embed_features = w_dim
         if c_dim == 0:
@@ -208,11 +211,14 @@ class MappingNetwork(torch.nn.Module):
             out_features = features_list[idx + 1]
             layer = FullyConnectedLayer(in_features, out_features, activation=activation, lr_multiplier=lr_multiplier)
             setattr(self, f'fc{idx}', layer)
+            layer = FullyConnectedLayer(in_features, out_features, activation=activation, lr_multiplier=lr_multiplier)
+            setattr(self, f'fc_pose{idx}', layer)
 
         if num_ws is not None and w_avg_beta is not None:
             self.register_buffer('w_avg', torch.zeros([w_dim]))
+            self.register_buffer('w_avg_pose', torch.zeros([w_dim]))
 
-    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False):
+    def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False, pose=True, style=True):
         # Embed, normalize, and concat inputs.
         x = None
         with torch.autograd.profiler.record_function('input'):
@@ -223,16 +229,35 @@ class MappingNetwork(torch.nn.Module):
                 misc.assert_shape(c, [None, self.c_dim])
                 y = normalize_2nd_moment(self.embed(c.to(torch.float32)))
                 x = torch.cat([x, y], dim=1) if x is not None else y
+        style_x = x[:, self.z_dim//2:]
+        pose_x = x[:, :self.z_dim//2]
 
         # Main layers.
         for idx in range(self.num_layers):
-            layer = getattr(self, f'fc{idx}')
-            x = layer(x)
+            if style:
+                layer = getattr(self, f'fc{idx}')
+                style_x = layer(style_x)
+            if pose:
+                layer = getattr(self, f'fc_pose{idx}')
+                pose_x = layer(pose_x)
 
         # Update moving average of W.
         if self.w_avg_beta is not None and self.training and not skip_w_avg_update:
             with torch.autograd.profiler.record_function('update_w_avg'):
-                self.w_avg.copy_(x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
+                if style:
+                    self.w_avg.copy_(style_x.detach().mean(dim=0).lerp(self.w_avg, self.w_avg_beta))
+                if pose:
+                    self.w_avg_pose.copy_(pose_x.detach().mean(dim=0).lerp(self.w_avg_pose, self.w_avg_beta))
+
+        if style and pose:
+            # Concatenate style & pose together for last steps.
+            x = torch.cat([style_x, pose_x], dim=1)
+        elif style:
+            x = style_x
+        elif pose:
+            x = pose_x
+        else:
+            raise AssertionError("Must chose style, pose or both.")
 
         # Broadcast.
         if self.num_ws is not None:
@@ -502,15 +527,16 @@ class Generator(torch.nn.Module):
 
     def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, produce_n=1, **synthesis_kwargs):
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
+
         imgs = []
         if produce_n > 1:
-            ws2 = self.mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:,:,:256]
+            ws2 = self.mapping(torch.randn_like(z), c, skip_w_avg_update=True, style=False)
         for j in range(produce_n):
             if j > 0:
                 # Alter ws by "nudging" a portion of it in a random small direction. The desired result is a small change in pose of the image.
                 path_eps = random.uniform(1e-3,1e-4)
-                nudge_ws = ws[:,:,:256].lerp(ws2, path_eps)
-                lw = torch.cat([nudge_ws, ws[:,:,256:]], dim=-1)
+                nudge_ws = ws[:,:,256:].lerp(ws2, path_eps)
+                lw = torch.cat([ws[:,:,:256], nudge_ws], dim=-1)
             else:
                 lw = ws
             imgs.append(self.synthesis(lw, **synthesis_kwargs))

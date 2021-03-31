@@ -44,16 +44,16 @@ class StyleGAN2Loss(Loss):
                 with torch.autograd.profiler.record_function('style_mixing'):
                     cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(1, ws.shape[1])
                     cutoff = torch.where(torch.rand([], device=ws.device) < self.style_mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
-                    ws[:, cutoff:] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:, cutoff:]
+                    ws[:, cutoff:, :256] = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True, pose=False)[:, cutoff:]
         outputs = []
         if self.output_images > 1:
-            ws3 = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True)[:,:,:256]
+            ws3 = self.G_mapping(torch.randn_like(z), c, skip_w_avg_update=True, style=False)
         for j in range(self.output_images):
             if j > 0:
-                # Alter ws by "nudging" a portion of it in a random small direction. The desired result is a small change in pose of the image.
+                # Alter ws by "nudging" a portion of it in a random small direction. The desired result is a small change in the pose of the image.
                 path_eps = random.uniform(1e-3,1e-4)
-                nudge_ws = ws[:,:,:256].lerp(ws3, path_eps)
-                lw = torch.cat([nudge_ws, ws[:,:,256:]], dim=-1)
+                nudge_ws = ws[:,:,256:].lerp(ws3, path_eps)
+                lw = torch.cat([ws[:,:,:256], nudge_ws], dim=-1)
             else:
                 lw = ws
             with misc.ddp_sync(self.G_synthesis, sync):
