@@ -191,7 +191,8 @@ def setup_training_loop_kwargs(
                                     freeze_latent_dict=stop_synthesis_gradients_at_glean, freeze_mapping_network=stop_mapping_gradients_at_glean,
                                     mapping_kwargs=dnnlib.EasyDict(), synthesis_kwargs=dnnlib.EasyDict())
     disc_stop_training_at = glean_res if stop_discriminator_gradients_at_glean else 0
-    args.D_kwargs = dnnlib.EasyDict(class_name='training.networks.Discriminator', block_kwargs=dnnlib.EasyDict(),
+    args.D_kwargs = dnnlib.EasyDict(class_name='training.networks.Discriminator',  enc_input_resolution=glean_res,
+                                    block_kwargs=dnnlib.EasyDict(),
                                     stop_training_at=disc_stop_training_at, mapping_kwargs=dnnlib.EasyDict(),
                                     epilogue_kwargs=dnnlib.EasyDict())
     args.G_kwargs.synthesis_kwargs.channel_base = args.D_kwargs.channel_base = int(spec.fmaps * 32768)

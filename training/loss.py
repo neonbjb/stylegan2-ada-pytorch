@@ -42,11 +42,11 @@ class StyleGAN2Loss(Loss):
             img = self.G(ws=ws, enc_conv_outs=enc_c)
         return img, ws
 
-    def run_D(self, img, c, sync):
+    def run_D(self, img, lq, c, sync):
         if self.augment_pipe is not None:
             img = self.augment_pipe(img)
         with misc.ddp_sync(self.D, sync):
-            logits = self.D(img, c)
+            logits = self.D(img, lq, c)
         return logits
 
     def accumulate_gradients(self, phase, real_img, real_img_lq, real_c, gen_z, gen_c, sync, gain):
@@ -60,7 +60,7 @@ class StyleGAN2Loss(Loss):
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_img_lq, sync=(sync and not do_Gpl)) # May get synced by Gpl.
-                gen_logits = self.run_D(gen_img, gen_c, sync=False)
+                gen_logits = self.run_D(gen_img, real_img_lq, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
@@ -96,7 +96,7 @@ class StyleGAN2Loss(Loss):
         if do_Dmain:
             with torch.autograd.profiler.record_function('Dgen_forward'):
                 gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_img_lq, sync=False)
-                gen_logits = self.run_D(gen_img, gen_c, sync=False) # Gets synced by loss_Dreal.
+                gen_logits = self.run_D(gen_img, real_img_lq, gen_c, sync=False) # Gets synced by loss_Dreal.
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Dgen = torch.nn.functional.softplus(gen_logits) # -log(1 - sigmoid(gen_logits))
@@ -109,7 +109,7 @@ class StyleGAN2Loss(Loss):
             name = 'Dreal_Dr1' if do_Dmain and do_Dr1 else 'Dreal' if do_Dmain else 'Dr1'
             with torch.autograd.profiler.record_function(name + '_forward'):
                 real_img_tmp = real_img.detach().requires_grad_(do_Dr1)
-                real_logits = self.run_D(real_img_tmp, real_c, sync=sync)
+                real_logits = self.run_D(real_img_tmp, real_img_lq, real_c, sync=sync)
                 training_stats.report('Loss/scores/real', real_logits)
                 training_stats.report('Loss/signs/real', real_logits.sign())
 
