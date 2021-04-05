@@ -13,6 +13,8 @@ import re
 from typing import List, Optional
 
 import click
+from torchvision import transforms
+
 import dnnlib
 import numpy as np
 import PIL.Image
@@ -21,6 +23,9 @@ import torch
 import legacy
 
 #----------------------------------------------------------------------------
+from training.gan_sr import SrGenerator
+from training.glean_networks import GleanGenerator
+
 
 def num_range(s: str) -> List[int]:
     '''Accept either a comma separated list of numbers 'a,b,c' or a range 'a-c' and return as a list of ints.'''
@@ -39,10 +44,11 @@ def num_range(s: str) -> List[int]:
 @click.option('--network', 'network_pkl', help='Network pickle filename', required=True)
 @click.option('--seeds', type=num_range, help='List of random seeds')
 @click.option('--trunc', 'truncation_psi', type=float, help='Truncation psi', default=1, show_default=True)
-@click.option('--class', 'class_idx', type=int, help='Class label (unconditional if not specified)')
+@click.option('--lq', 'lq_path', type=str, help='Path to LQ images', required=True)
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--projected-w', help='Projection result file', type=str, metavar='FILE')
 @click.option('--outdir', help='Where to save the output images', type=str, required=True, metavar='DIR')
+@click.option('--latent_starting_dim', help="The LQ image dimension the network was trained at", type=int, required=True)
 def generate_images(
     ctx: click.Context,
     network_pkl: str,
@@ -50,8 +56,9 @@ def generate_images(
     truncation_psi: float,
     noise_mode: str,
     outdir: str,
-    class_idx: Optional[int],
-    projected_w: Optional[str]
+    lq_path: str,
+    projected_w: Optional[str],
+    latent_starting_dim: int
 ):
     """Generate images using pretrained network pickle.
 
@@ -82,6 +89,24 @@ def generate_images(
     device = torch.device('cuda')
     with dnnlib.util.open_url(network_pkl) as f:
         G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+    args = {
+        'z_dim': 512,
+        'c_dim': 0,
+        'w_dim': 512,
+        'img_resolution': 64,
+        'img_channels': 3,
+        'enc_input_resolution': 16,
+        'mapping_kwargs': {'num_layers': 2},
+        'synthesis_kwargs': {
+            'channel_base': 16384,
+            'channel_max': 512,
+            'num_fp16_res': 4,
+            'conv_clamp': 256
+        }
+    }
+    G_nat = SrGenerator(**args)
+    G_nat.load_state_dict(G.state_dict())
+    G = G_nat.to('cuda')
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -102,21 +127,19 @@ def generate_images(
     if seeds is None:
         ctx.fail('--seeds option is required when not using --projected-w')
 
-    # Labels.
-    label = torch.zeros([1, G.c_dim], device=device)
-    if G.c_dim != 0:
-        if class_idx is None:
-            ctx.fail('Must specify class label with --class when using a conditional network')
-        label[:, class_idx] = 1
-    else:
-        if class_idx is not None:
-            print ('warn: --class=lbl ignored when running on an unconditional network')
+    # LQ
+    lq_img = PIL.Image.open(lq_path)
+    lq = transforms.PILToTensor()(lq_img).cuda().unsqueeze(0).float() / 127.5 - 1
+    lq_for_latent = torch.nn.functional.interpolate(lq, size=(latent_starting_dim, latent_starting_dim), mode="bilinear")
 
     # Generate images.
     for seed_idx, seed in enumerate(seeds):
         print('Generating image for seed %d (%d/%d) ...' % (seed, seed_idx, len(seeds)))
         z = torch.from_numpy(np.random.RandomState(seed).randn(1, G.gen_bank.z_dim)).to(device)
-        img = G(z, label, truncation_psi=truncation_psi, noise_mode=noise_mode)
+        _, latent = G.do_encoder(lq_for_latent)
+        conv_outs, _ = G.do_encoder_no_latent(lq)
+        ws = G.do_latent_mapping_for_single(z=z, enc_latent=latent, truncation_psi=truncation_psi)
+        img = G(ws=ws, enc_conv_outs=conv_outs)
         img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
         PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')
 

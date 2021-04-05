@@ -68,14 +68,17 @@ class GleanEncoder(nn.Module):
         self.latent_encoder_final = DiscriminatorEpilogue(channels_dict[4], cmap_dim=channel_max, resolution=4,
                                                           **epilogue_kwargs, **common_kwargs)
 
-    def forward(self, img, **block_kwargs):
+    def forward(self, img, no_latent=False, **block_kwargs):
         x = None
         conv_outs = {}
         for output_res in self.block_output_resolutions:
             block = getattr(self, f'conv_enc_{output_res}')
             x, img = block(x, img, **block_kwargs)
             conv_outs[output_res] = x
-        lat = self.latent_encoder_final(x, img, None)
+        if no_latent:
+            lat = None
+        else:
+            lat = self.latent_encoder_final(x, img, None)
         return conv_outs, lat
 
 
@@ -142,6 +145,11 @@ class GleanGenerator(nn.Module):
     def do_encoder(self, lq, **synthesis_kwargs):
         block_args = opt_get(synthesis_kwargs, ['block_kwargs'], {})
         conv_outs, latent = self.encoder(lq, **block_args)
+        return conv_outs, latent
+
+    def do_encoder_no_latent(self, lq, **synthesis_kwargs):
+        block_args = opt_get(synthesis_kwargs, ['block_kwargs'], {})
+        conv_outs, latent = self.encoder(lq, no_latent=True, **block_args)
         return conv_outs, latent
 
     def do_latent_mapping_for_single(self, z, enc_latent, truncation_psi=1, truncation_cutoff=None,

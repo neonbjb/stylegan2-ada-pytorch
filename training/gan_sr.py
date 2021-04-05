@@ -68,14 +68,17 @@ class SrEncoder(nn.Module):
         self.latent_encoder_final = DiscriminatorEpilogue(channels_dict[4], cmap_dim=channel_max, resolution=4,
                                                           **epilogue_kwargs, **common_kwargs)
 
-    def forward(self, img, **block_kwargs):
+    def forward(self, img, no_latent=False, **block_kwargs):
         x = None
         conv_outs = {}
         for output_res in self.block_output_resolutions:
             block = getattr(self, f'conv_enc_{output_res}')
             x, img = block(x, img, **block_kwargs)
             conv_outs[output_res] = x
-        lat = self.latent_encoder_final(x, img, None)
+        if no_latent:
+            lat = None
+        else:
+            lat = self.latent_encoder_final(x, img, None)
         return conv_outs, lat
 
 
@@ -131,6 +134,11 @@ class SrGenerator(nn.Module):
     def do_encoder(self, lq, **synthesis_kwargs):
         block_args = opt_get(synthesis_kwargs, ['block_kwargs'], {})
         conv_outs, latent = self.encoder(lq, **block_args)
+        return conv_outs, latent
+
+    def do_encoder_no_latent(self, lq, **synthesis_kwargs):
+        block_args = opt_get(synthesis_kwargs, ['block_kwargs'], {})
+        conv_outs, latent = self.encoder(lq, no_latent=True, **block_args)
         return conv_outs, latent
 
     def do_latent_mapping_for_single(self, z, enc_latent, truncation_psi=1, truncation_cutoff=None,
@@ -214,6 +222,9 @@ class SrGenerator(nn.Module):
             synblock = getattr(synth, f'b{res}')
             if first:
                 x, img = synblock(x, img, cur_ws, **block_args)
+                # TODO: FIX ME
+                x = torch.nn.functional.interpolate(x, scale_factor=4, mode='bilinear')
+                img = torch.nn.functional.interpolate(img, scale_factor=4, mode='bilinear')
             else:
                 # First, convert to the correct memory format and dtype. The synthesis network would normally have done this for us, but we're prepending it.
                 dtype = torch.float16 if synblock.use_fp16 and not force_fp32 else torch.float32
