@@ -149,19 +149,9 @@ class SrGenerator(nn.Module):
             self.gen_bank.mapping.eval()
 
         ws = self.gen_bank.mapping(z, None, skip_trunc_and_broadcast=True, skip_w_avg_update=skip_w_avg_update)
-        if enc_latent is not None:   # YOU SHOULD NOT DO enc_latent=None UNLESS YOU REALLY KNOW WHAT YOU ARE DOING. THE ENCODER LAYERS MUST USE THE ENCODER LATENT FOR GLEAN TO WORK.
-            wse = self.enc_w_combiner(torch.cat([ws, enc_latent], dim=-1))
-            wse = self.gen_bank.mapping.apply_truncation_and_broadcast(wse, truncation_psi=truncation_psi,
-                                                                      truncation_cutoff=truncation_cutoff)
-        else:
-            wse = None
-        ws = self.gen_bank.mapping.apply_truncation_and_broadcast(ws, truncation_psi=truncation_psi,
+        wse = self.enc_w_combiner(torch.cat([ws, enc_latent], dim=-1))
+        ws = self.gen_bank.mapping.apply_truncation_and_broadcast(wse, truncation_psi=truncation_psi,
                                                                   truncation_cutoff=truncation_cutoff)
-        if wse is None:
-            wse = ws
-        # `wse` is used for the encoder blocks, while `ws` is used for the decoder blocks.
-        enc_split_ind = (self.enc_input_resolution_log2-2)*2
-        ws = torch.cat([wse[:, :enc_split_ind, :], ws[:, enc_split_ind:, :]], dim=1)
         return ws
 
     # Performs style mixing only within the SR region of the generator.
@@ -171,7 +161,7 @@ class SrGenerator(nn.Module):
             enc_split_ind = (self.enc_input_resolution_log2-2)*2
             cutoff = torch.empty([], dtype=torch.int64, device=ws.device).random_(enc_split_ind + 1, ws.shape[1])
             cutoff = torch.where(torch.rand([], device=ws.device) < mixing_prob, cutoff, torch.full_like(cutoff, ws.shape[1]))
-            ws[:, cutoff:] = self.do_latent_mapping_for_single(torch.randn_like(z), enc_latent=None,
+            ws[:, cutoff:] = self.do_latent_mapping_for_single(torch.randn_like(z), enc_latent=enc_latent,
                                                                truncation_psi=truncation_psi,
                                                                truncation_cutoff=truncation_cutoff,
                                                                skip_w_avg_update=True)[:, cutoff:]
