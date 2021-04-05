@@ -212,9 +212,9 @@ class SrGenerator(nn.Module):
             synblock = getattr(synth, f'b{res}')
             if first:
                 x, img = synblock(x, img, cur_ws, **block_args)
-                # TODO: FIX ME
-                x = torch.nn.functional.interpolate(x, scale_factor=4, mode='bilinear')
-                img = torch.nn.functional.interpolate(img, scale_factor=4, mode='bilinear')
+                # TODO: FIX ME - this needs to get the x output of the synblock to match the original lq image input.
+                #x = torch.nn.functional.interpolate(x, scale_factor=4, mode='bilinear')
+                #img = torch.nn.functional.interpolate(img, scale_factor=4, mode='bilinear')
             else:
                 # First, convert to the correct memory format and dtype. The synthesis network would normally have done this for us, but we're prepending it.
                 dtype = torch.float16 if synblock.use_fp16 and not force_fp32 else torch.float32
