@@ -85,6 +85,41 @@ def modulated_conv2d(
         x = x.add_(noise)
     return x
 
+
+@misc.profiled_function
+def unmodulated_conv2d(
+    x,                          # Input tensor of shape [batch_size, in_channels, in_height, in_width].
+    weight,                     # Weight tensor of shape [out_channels, in_channels, kernel_height, kernel_width].
+    up              = 1,        # Integer upsampling factor.
+    down            = 1,        # Integer downsampling factor.
+    padding         = 0,        # Padding with respect to the upsampled image.
+    resample_filter = None,     # Low-pass filter to apply when resampling activations. Must be prepared beforehand by calling upfirdn2d.setup_filter().
+    demodulate      = True,     # Apply weight demodulation?
+    flip_weight     = True,     # False = convolution, True = correlation (matches torch.nn.functional.conv2d).
+    fused_modconv   = True,     # Perform modulation, convolution, and demodulation as a single fused operation?
+):
+    batch_size = x.shape[0]
+    out_channels, in_channels, kh, kw = weight.shape
+    misc.assert_shape(weight, [out_channels, in_channels, kh, kw]) # [OIkk]
+    misc.assert_shape(x, [batch_size, in_channels, None, None]) # [NIHW]
+
+    # Execute by scaling the activations before and after the convolution.
+    if not fused_modconv:
+        x = conv2d_resample.conv2d_resample(x=x, w=weight.to(x.dtype), f=resample_filter, up=up, down=down, padding=padding, flip_weight=flip_weight)
+        return x
+
+    # Execute as one fused op using grouped convolution.
+    w = weight.unsqueeze(0) # [NOIkk]
+    with misc.suppress_tracer_warnings(): # this value will be treated as a constant
+        batch_size = int(batch_size)
+    misc.assert_shape(x, [batch_size, in_channels, None, None])
+    x = x.reshape(1, -1, *x.shape[2:])
+    w = w.reshape(-1, in_channels, kh, kw)
+    w = w.repeat(batch_size, 1, 1, 1)
+    x = conv2d_resample.conv2d_resample(x=x, w=w.to(x.dtype), f=resample_filter, up=up, down=down, padding=padding, groups=batch_size, flip_weight=flip_weight)
+    x = x.reshape(batch_size, -1, *x.shape[2:])
+    return x
+
 #----------------------------------------------------------------------------
 
 @persistence.persistent_class
@@ -271,6 +306,54 @@ class MappingNetwork(torch.nn.Module):
 
 #----------------------------------------------------------------------------
 
+
+@persistence.persistent_class
+class SynthesisLayerNoStyling(torch.nn.Module):
+    def __init__(self,
+        in_channels,                    # Number of input channels.
+        out_channels,                   # Number of output channels.
+        w_dim,                          # Intermediate latent (W) dimensionality.
+        resolution,                     # Resolution of this layer.
+        kernel_size     = 3,            # Convolution kernel size.
+        up              = 1,            # Integer upsampling factor.
+        use_noise       = True,         # Enable noise input?
+        activation      = 'lrelu',      # Activation function: 'relu', 'lrelu', etc.
+        resample_filter = [1,3,3,1],    # Low-pass filter to apply when resampling activations.
+        conv_clamp      = None,         # Clamp the output of convolution layers to +-X, None = disable clamping.
+        channels_last   = False,        # Use channels_last format for the weights?
+    ):
+        super().__init__()
+        self.in_channels = in_channels
+        self.out_channels = out_channels
+        self.w_dim = w_dim
+        self.resolution = resolution
+        self.kernel_size = kernel_size
+        self.up = up
+        self.use_noise = use_noise
+        self.activation = activation
+        self.conv_clamp = conv_clamp
+        self.register_buffer('resample_filter', upfirdn2d.setup_filter(resample_filter))
+        self.padding = kernel_size // 2
+        self.act_gain = bias_act.activation_funcs[activation].def_gain
+
+        memory_format = torch.channels_last if channels_last else torch.contiguous_format
+        self.weight = torch.nn.Parameter(torch.randn([out_channels, in_channels, kernel_size, kernel_size]).to(memory_format=memory_format))
+        self.bias = torch.nn.Parameter(torch.zeros([out_channels]))
+
+    def forward(self, x, w, noise_mode='random', fused_modconv=True, gain=1):
+        assert noise_mode in ['random', 'const', 'none']
+        in_resolution = self.resolution // self.up
+        misc.assert_shape(x, [None, self.weight.shape[1], in_resolution, in_resolution])
+
+        flip_weight = (self.up == 1) # slightly faster
+        x = unmodulated_conv2d(x=x, weight=self.weight, up=self.up, padding=self.padding, resample_filter=self.resample_filter, flip_weight=flip_weight, fused_modconv=fused_modconv)
+
+        act_gain = self.act_gain * gain
+        act_clamp = self.conv_clamp * gain if self.conv_clamp is not None else None
+        x = bias_act.bias_act(x, self.bias.to(x.dtype), act=self.activation, gain=act_gain, clamp=act_clamp)
+        return x
+
+
 @persistence.persistent_class
 class SynthesisLayer(torch.nn.Module):
     def __init__(self,
@@ -364,6 +447,7 @@ class SynthesisBlock(torch.nn.Module):
         conv_clamp          = None,         # Clamp the output of convolution layers to +-X, None = disable clamping.
         use_fp16            = False,        # Use FP16 for this block?
         fp16_channels_last  = False,        # Use channels-last memory format with FP16?
+        do_style_modulation = True,
         **layer_kwargs,                     # Arguments for SynthesisLayer.
     ):
         assert architecture in ['orig', 'skip', 'resnet']
@@ -383,12 +467,14 @@ class SynthesisBlock(torch.nn.Module):
         if in_channels == 0:
             self.const = torch.nn.Parameter(torch.randn([out_channels, resolution, resolution]))
 
+        synthesis_layer_clz = SynthesisLayer if do_style_modulation else SynthesisLayerNoStyling
+
         if in_channels != 0:
-            self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
+            self.conv0 = synthesis_layer_clz(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
                 resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last, **layer_kwargs)
             self.num_conv += 1
 
-        self.conv1 = SynthesisLayer(out_channels, out_channels, w_dim=w_dim, resolution=resolution,
+        self.conv1 = synthesis_layer_clz(out_channels, out_channels, w_dim=w_dim, resolution=resolution,
             conv_clamp=conv_clamp, channels_last=self.channels_last, **layer_kwargs)
         self.num_conv += 1
 
@@ -455,6 +541,7 @@ class SynthesisNetwork(torch.nn.Module):
         channel_base    = 32768,    # Overall multiplier for the number of channels.
         channel_max     = 512,      # Maximum number of channels in any layer.
         num_fp16_res    = 0,        # Use FP16 for the N highest resolutions.
+        bottom_n_blocks_no_styles = 0,  # This number of bottom blocks will not use modulated convolutions.
         **block_kwargs,             # Arguments for SynthesisBlock.
     ):
         assert img_resolution >= 4 and img_resolution & (img_resolution - 1) == 0
@@ -468,13 +555,14 @@ class SynthesisNetwork(torch.nn.Module):
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
 
         self.num_ws = 0
-        for res in self.block_resolutions:
+        for i, res in enumerate(self.block_resolutions):
             in_channels = channels_dict[res // 2] if res > 4 else 0
             out_channels = channels_dict[res]
             use_fp16 = (res >= fp16_resolution)
             is_last = (res == self.img_resolution)
             block = SynthesisBlock(in_channels, out_channels, w_dim=w_dim, resolution=res,
-                img_channels=img_channels, is_last=is_last, use_fp16=use_fp16, **block_kwargs)
+                img_channels=img_channels, is_last=is_last, use_fp16=use_fp16, do_style_modulation=i >= bottom_n_blocks_no_styles,
+                                   **block_kwargs)
             self.num_ws += block.num_conv
             if is_last:
                 self.num_ws += block.num_torgb

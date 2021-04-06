@@ -99,6 +99,7 @@ class SrGenerator(nn.Module):
                  enc_epilogue_kwargs={}
                  ):
         super().__init__()
+        self.enc_input_resolution_log2 = int(np.log2(enc_input_resolution))
         self.freeze_synthesis_network = freeze_latent_dict
         self.freeze_mapping_network = freeze_mapping_network
         channel_base = opt_get(synthesis_kwargs, ['channel_base'], 32768)
@@ -106,6 +107,7 @@ class SrGenerator(nn.Module):
         self.encoder = SrEncoder(c_dim, enc_input_resolution, img_channels, channel_base=channel_base,
                                     channel_max=channel_max, block_kwargs=enc_block_kwargs,
                                     epilogue_kwargs=enc_epilogue_kwargs)
+        synthesis_kwargs['bottom_n_blocks_no_styles'] = self.enc_input_resolution_log2-1
         self.gen_bank = Generator(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs, synthesis_kwargs)
 
         # StyleGAN Generator Attachments
@@ -114,7 +116,6 @@ class SrGenerator(nn.Module):
         layer_kwargs = opt_get(synthesis_kwargs, ['block_kwargs', 'layer_kwargs'], {})
         self.img_resolution = img_resolution
         self.img_resolution_log2 = int(np.log2(img_resolution))
-        self.enc_input_resolution_log2 = int(np.log2(enc_input_resolution))
         self.img_channels = img_channels
         self.enc_attachment_resolutions = [2 ** i for i in range(self.enc_input_resolution_log2, 1, -1)]
         self.dec_attachment_resolutions = [2 ** i for i in
@@ -236,39 +237,6 @@ class SrGenerator(nn.Module):
             return img, ws
         else:
             return img
-
-
-def convert_stylegan2_pickle(pkl, enc_input_resolution):
-    with dnnlib.util.open_url(pkl) as f:
-        resume_data = legacy.load_network_pkl(f)
-    G = dnnlib.util.construct_class_by_name(class_name='training.gan_sr.SrGenerator',
-                                            enc_input_resolution=enc_input_resolution, **resume_data['G'].init_kwargs)
-    G_ema = copy.deepcopy(G).eval()
-    for name, module in [('G_ema', G.gen_bank),
-                         ('G_ema', G_ema.gen_bank)]:  # Note: both G and G_ema start from the saved G_ema intentionally.
-        module.load_state_dict(resume_data[name].state_dict(), strict=True)
-
-    # Discriminator is a special case - we want to copy the parameters from the lower half of the network, but leave
-    # the new init in the upper half.
-    D = dnnlib.util.construct_class_by_name(class_name='training.networks.Discriminator',
-                                            stop_training_at=enc_input_resolution, **resume_data['D'].init_kwargs)
-    pretrained_sd = resume_data['D'].state_dict()
-    scrubbed_sd = OrderedDict()
-    for k, v in pretrained_sd.items():
-        block_res = int(k.split('.')[0][1:])
-        if block_res <= enc_input_resolution:  # This intentionally mismatches with the Discriminator "stop_training_at" implementation: We load the pretrained weights *at* the encoder dimension *and* train at that dimension.
-            scrubbed_sd[k] = v
-    D.load_state_dict(scrubbed_sd, strict=False)
-
-    # Save snapshot.
-    snapshot_data = dict(training_set_kwargs=resume_data['training_set_kwargs'])
-    for name, module in [('G', G), ('D', D), ('G_ema', G_ema), ('augment_pipe', resume_data['augment_pipe'])]:
-        if module is not None:
-            module = copy.deepcopy(module).eval().requires_grad_(False).cpu()
-        snapshot_data[name] = module
-        del module  # conserve memory
-    with open('converted-0.pkl', 'wb') as f:
-        pickle.dump(snapshot_data, f)
 
 
 if __name__ == '__main__':
