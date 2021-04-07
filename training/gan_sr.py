@@ -129,7 +129,7 @@ class SrGenerator(nn.Module):
             out_channels = channels_dict[res]
             in_channels = out_channels * 2  # The input comes from both the previous gen bank output and the level-wise encoder output.
             layer = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=res, conv_clamp=conv_clamp,
-                                   channels_last=channels_last, **layer_kwargs)
+                                   channels_last=channels_last, do_style_modulation=False, **layer_kwargs)
             setattr(self, f'enc_attachment_{res}', layer)
 
     def do_encoder(self, lq, **synthesis_kwargs):
