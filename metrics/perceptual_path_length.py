@@ -119,8 +119,7 @@ def compute_ppl(opts, num_samples, epsilon, space, sampling, crop, batch_size, j
     sampler = PPLSampler(G=opts.G, G_kwargs=opts.G_kwargs, epsilon=epsilon, space=space, sampling=sampling, crop=crop, vgg16=vgg16, dataset_kwargs=opts.dataset_kwargs)
     sampler.eval().requires_grad_(False).to(opts.device)
     if jit:
-        c = torch.zeros([batch_size, opts.G.c_dim], device=opts.device)
-        sampler = torch.jit.trace(sampler, [c], check_trace=False)
+        sampler = torch.jit.trace(sampler, [None], check_trace=False)
 
     # Sampling loop.
     dist = []

@@ -86,7 +86,6 @@ class SrEncoder(nn.Module):
 class SrGenerator(nn.Module):
     def __init__(self,
                  z_dim,  # Input latent (Z) dimensionality.
-                 c_dim,  # Conditioning label (C) dimensionality.
                  w_dim,  # Intermediate latent (W) dimensionality.
                  img_resolution,  # Output resolution.
                  img_channels,  # Number of output color channels.
@@ -104,11 +103,11 @@ class SrGenerator(nn.Module):
         self.freeze_mapping_network = freeze_mapping_network
         channel_base = opt_get(synthesis_kwargs, ['channel_base'], 32768)
         channel_max = opt_get(synthesis_kwargs, ['channel_max'], 512)
-        self.encoder = SrEncoder(c_dim, enc_input_resolution, img_channels, channel_base=channel_base,
+        self.encoder = SrEncoder(0, enc_input_resolution, img_channels, channel_base=channel_base,
                                     channel_max=channel_max, block_kwargs=enc_block_kwargs,
                                     epilogue_kwargs=enc_epilogue_kwargs)
         synthesis_kwargs['bottom_n_blocks_no_styles'] = self.enc_input_resolution_log2-1
-        self.gen_bank = Generator(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs, synthesis_kwargs)
+        self.gen_bank = Generator(z_dim, w_dim, w_dim, img_resolution, img_channels, mapping_kwargs, synthesis_kwargs)
 
         # StyleGAN Generator Attachments
         conv_clamp = opt_get(synthesis_kwargs, ['block_kwargs', 'conv_clamp'], None)
@@ -149,9 +148,8 @@ class SrGenerator(nn.Module):
                 p.requires_grad = False
             self.gen_bank.mapping.eval()
 
-        ws = self.gen_bank.mapping(z, None, skip_trunc_and_broadcast=True, skip_w_avg_update=skip_w_avg_update)
-        wse = self.enc_w_combiner(torch.cat([ws, enc_latent], dim=-1))
-        ws = self.gen_bank.mapping.apply_truncation_and_broadcast(wse, truncation_psi=truncation_psi,
+        ws = self.gen_bank.mapping(z, enc_latent, skip_trunc_and_broadcast=True, skip_w_avg_update=skip_w_avg_update)
+        ws = self.gen_bank.mapping.apply_truncation_and_broadcast(ws, truncation_psi=truncation_psi,
                                                                   truncation_cutoff=truncation_cutoff)
         return ws
 
@@ -242,7 +240,6 @@ class SrGenerator(nn.Module):
 if __name__ == '__main__':
     args = {
         'z_dim': 512,
-        'c_dim': 0,
         'w_dim': 512,
         'img_resolution': 256,
         'img_channels': 3,
