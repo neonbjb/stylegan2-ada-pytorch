@@ -24,7 +24,6 @@ import legacy
 
 #----------------------------------------------------------------------------
 from training.gan_sr import SrGenerator
-from training.glean_networks import GleanGenerator
 
 
 def num_range(s: str) -> List[int]:
