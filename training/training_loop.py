@@ -151,7 +151,7 @@ def training_loop(
     # Construct networks.
     if rank == 0:
         print('Constructing networks...')
-    common_kwargs = dict(c_dim=training_set.label_dim, img_resolution=training_set.resolution, img_channels=training_set.num_channels)
+    common_kwargs = dict(img_resolution=training_set.resolution, img_channels=training_set.num_channels)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
@@ -182,10 +182,9 @@ def training_loop(
     # Print network summary tables.
     if rank == 0:
         z = torch.empty([batch_gpu, G.gen_bank.z_dim], device=device)
-        c = torch.empty([batch_gpu, G.gen_bank.c_dim], device=device)
         lq = torch.empty([batch_gpu, 3, lq_res, lq_res], device=device)
-        img = misc.print_module_summary(G, [z, c, lq])
-        misc.print_module_summary(D, [img, c])
+        img = misc.print_module_summary(G, [z, None, lq])
+        misc.print_module_summary(D, [img, None])
 
     # Setup augmentation.
     if rank == 0:

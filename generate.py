@@ -91,7 +91,7 @@ def generate_images(
         G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
     args = {
         'z_dim': 512,
-        'c_dim': 0,
+        'sr_dim': 0,
         'w_dim': 512,
         'img_resolution': 64,
         'img_channels': 3,

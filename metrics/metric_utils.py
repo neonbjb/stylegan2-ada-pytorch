@@ -253,8 +253,7 @@ def compute_feature_stats_for_generator(lqs, opts, detector_url, detector_kwargs
     # JIT.
     if jit:
         z = torch.zeros([batch_gen, G.gen_bank.z_dim], device=opts.device)
-        c = torch.zeros([batch_gen, G.gen_bank.c_dim], device=opts.device)
-        run_generator = torch.jit.trace(run_generator, [z, c], check_trace=False)
+        run_generator = torch.jit.trace(run_generator, [z, None], check_trace=False)
 
     # Initialize.
     stats = FeatureStats(**stats_kwargs)
