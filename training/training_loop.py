@@ -194,7 +194,7 @@ def training_loop(
         lq = torch.empty([batch_gpu, 3, lq_res, lq_res], device=device)
         lq_enc = torch.empty([batch_gpu, G.gen_bank.sr_dim], device=device)
         img = misc.print_module_summary(G, [z, None, lq, lq_enc])
-        misc.print_module_summary(D, [img, None])
+        misc.print_module_summary(D, [img, lq_enc])
 
     # Setup augmentation.
     if rank == 0:
