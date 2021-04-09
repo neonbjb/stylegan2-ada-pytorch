@@ -138,7 +138,7 @@ def generate_images(
         z = torch.from_numpy(np.random.RandomState(seed).randn(1, G.gen_bank.z_dim)).to(device)
         _, latent = G.do_encoder(lq_for_latent)
         conv_outs, _ = G.do_encoder_no_latent(lq)
-        ws = G.do_latent_mapping_for_single(z=z, enc_latent=latent, truncation_psi=truncation_psi)
+        ws = G.do_latent_mapping_for_single(z=z, lq_latent=latent, truncation_psi=truncation_psi)
         img = G(ws=ws, enc_conv_outs=conv_outs)
         img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
         PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')

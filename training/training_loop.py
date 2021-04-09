@@ -15,6 +15,8 @@ import psutil
 import PIL.Image
 import numpy as np
 import torch
+from torchvision.models import resnet50
+
 import dnnlib
 from torch_utils import misc
 from torch_utils import training_stats
@@ -122,6 +124,7 @@ def training_loop(
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
     switched_conv_breadth   = None,
     glean_scale_factor      = 8,
+    lq_encoder_pretrained_path = None,
 ):
     # Initialize.
     start_time = time.time()
@@ -151,7 +154,7 @@ def training_loop(
     # Construct networks.
     if rank == 0:
         print('Constructing networks...')
-    common_kwargs = dict(img_resolution=training_set.resolution, img_channels=training_set.num_channels)
+    common_kwargs = dict(img_resolution=training_set.resolution, img_channels=training_set.num_channels, sr_enc_dim=1000)
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
@@ -166,6 +169,12 @@ def training_loop(
     G_ema.eval()
     for p in G_ema.parameters():
         p.requires_grad = False
+
+    lq_encoder = resnet50(pretrained=False).to(device)
+    lq_encoder.load_state_dict(torch.load(lq_encoder_pretrained_path))
+    for p in lq_encoder.parameters():
+        p.requires_grad = False
+    lq_encoder.eval()
 
     # Resume from existing pickle.
     if resume_pkl is not None:
@@ -183,7 +192,8 @@ def training_loop(
     if rank == 0:
         z = torch.empty([batch_gpu, G.gen_bank.z_dim], device=device)
         lq = torch.empty([batch_gpu, 3, lq_res, lq_res], device=device)
-        img = misc.print_module_summary(G, [z, None, lq])
+        lq_enc = torch.empty([batch_gpu, G.gen_bank.sr_dim], device=device)
+        img = misc.print_module_summary(G, [z, None, lq, lq_enc])
         misc.print_module_summary(D, [img, None])
 
     # Setup augmentation.
@@ -208,6 +218,7 @@ def training_loop(
             module.requires_grad_(False)
         if name is not None:
             ddp_modules[name] = module
+    ddp_modules['lq_encoder'] = lq_encoder
 
     # Setup training phases.
     if rank == 0:
@@ -247,9 +258,10 @@ def training_loop(
             grid_size, images, lqs, labels = setup_snapshot_image_grid(training_set=training_set)
             save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
             grid_lq = (torch.from_numpy(lqs) / 127.5 - 1).to(device).split(batch_gpu)
+            grid_lq_encoded = [lq_encoder(torch.nn.functional.interpolate(lq, size=(224,224), mode='bilinear', align_corners=False)).detach() for lq in grid_lq]
             grid_z = torch.randn([labels.shape[0], G.gen_bank.z_dim], device=device).split(batch_gpu)
             grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-            images = torch.cat([G_ema(z=z, c=c, lq=lq, noise_mode='const').cpu() for z, c, lq in zip(grid_z, grid_c, grid_lq)]).numpy()
+            images = torch.cat([G_ema(z=z, c=c, lq=lq, lq_latent=lq_enc, noise_mode='const').cpu() for z, c, lq, lq_enc in zip(grid_z, grid_c, grid_lq, grid_lq_encoded)]).numpy()
             save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
 
     # Initialize logs.
@@ -376,14 +388,14 @@ def training_loop(
 
         # Save image snapshot.
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-            images = torch.cat([G_ema(z=z, c=c, lq=lq, noise_mode='const').cpu() for z, c, lq in zip(grid_z, grid_c, grid_lq)]).numpy()
+            images = torch.cat([G_ema(z=z, c=c, lq=lq, lq_latent=lq_enc, noise_mode='const').cpu() for z, c, lq, lq_enc in zip(grid_z, grid_c, grid_lq, grid_lq_encoded)]).numpy()
             save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
 
         # Save debugging images. Done frequently, every 5 ticks.
         if (rank == 0) and (image_snapshot_ticks is not None) and (cur_tick % 10 == 0):
             dbg_ind = (cur_tick / 10) % 5  # Uses a rotating buffer so as to not produce a shitload of images.
             with torch.no_grad():
-                images = torch.cat([G(z=z, c=c, lq=lq, noise_mode='const').cpu() for z, c, lq in zip(grid_z, grid_c, grid_lq)]).numpy()
+                images = torch.cat([G(z=z, c=c, lq=lq, lq_latent=lq_enc, noise_mode='const').cpu() for z, c, lq, lq_enc in zip(grid_z, grid_c, grid_lq, grid_lq_encoded)]).numpy()
             save_image_grid(images, os.path.join(run_dir, f'debug_image_{dbg_ind}.png'), drange=[-1,1], grid_size=grid_size)
 
         # Save network snapshot.
@@ -410,7 +422,7 @@ def training_loop(
             if rank == 0:
                 print('Evaluating metrics...')
             for metric in metrics:
-                result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'],
+                result_dict = metric_main.calc_metric(metric=metric, G=snapshot_data['G_ema'], latent_encoder=lq_encoder,
                     dataset_kwargs=training_set_kwargs, num_gpus=num_gpus, rank=rank, device=device)
                 if rank == 0:
                     metric_main.report_metric(result_dict, run_dir=run_dir, snapshot_pkl=snapshot_pkl)

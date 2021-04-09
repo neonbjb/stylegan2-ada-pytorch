@@ -21,11 +21,12 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, G_lq_mse_weight=10, sr_loss_avg_channels=False):
+    def __init__(self, device, G, D, lq_encoder, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, G_lq_mse_weight=10, sr_loss_avg_channels=False):
         super().__init__()
         self.device = device
         self.G = G
         self.D = D
+        self.lq_encoder = lq_encoder
         self.augment_pipe = augment_pipe
         self.style_mixing_prob = style_mixing_prob
         self.r1_gamma = r1_gamma
@@ -36,10 +37,10 @@ class StyleGAN2Loss(Loss):
         self.g_lq_mse_weight = G_lq_mse_weight
         self.sr_loss_avg_channels = sr_loss_avg_channels  # Useful when the LQ input does not share the same colorspace as the HQ reference images.
 
-    def run_G(self, z, c, lq, sync):
+    def run_G(self, z, c, lq, lq_enc, sync):
         with misc.ddp_sync(self.G, sync):
-            enc_c, enc_l = self.G.do_encoder(lq=lq)
-            ws = self.G.do_latent_mapping_with_mixing(z=z, enc_latent=enc_l, mixing_prob=self.style_mixing_prob)
+            enc_c = self.G.do_encoder(lq=lq)
+            ws = self.G.do_latent_mapping_with_mixing(z=z, lq_latent=lq_enc, mixing_prob=self.style_mixing_prob)
             img = self.G(ws=ws, enc_conv_outs=enc_c)
         return img, ws
 
@@ -56,11 +57,14 @@ class StyleGAN2Loss(Loss):
         do_Dmain = (phase in ['Dmain', 'Dboth'])
         do_Gpl   = (phase in ['Greg', 'Gboth']) and (self.pl_weight != 0)
         do_Dr1   = (phase in ['Dreg', 'Dboth']) and (self.r1_gamma != 0)
+        
+        # Fetch LQ encoder output
+        lq_enc = self.lq_encoder(torch.nn.functional.interpolate(real_img_lq, size=(224,224), mode='bilinear', align_corners=False))
 
         # Gmain: Maximize logits for generated images.
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_img_lq, sync=(sync and not do_Gpl)) # May get synced by Gpl.
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_img_lq, lq_enc, sync=(sync and not do_Gpl)) # May get synced by Gpl.
                 gen_logits = self.run_D(gen_img, gen_c, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
@@ -85,7 +89,7 @@ class StyleGAN2Loss(Loss):
         if do_Gpl:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
-                gen_img, gen_ws = self.run_G(gen_z[:batch_size], gen_c[:batch_size], real_img_lq[:batch_size], sync=sync)
+                gen_img, gen_ws = self.run_G(gen_z[:batch_size], gen_c[:batch_size], real_img_lq[:batch_size], lq_enc[:batch_size], sync=sync)
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
                     pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
@@ -103,7 +107,7 @@ class StyleGAN2Loss(Loss):
         loss_Dgen = 0
         if do_Dmain:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_img_lq, sync=False)
+                gen_img, _gen_ws = self.run_G(gen_z, gen_c, real_img_lq, lq_enc, sync=False)
                 gen_logits = self.run_D(gen_img, gen_c, sync=False) # Gets synced by loss_Dreal.
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())

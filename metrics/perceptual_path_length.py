@@ -36,11 +36,12 @@ def slerp(a, b, t):
 #----------------------------------------------------------------------------
 
 class PPLSampler(torch.nn.Module):
-    def __init__(self, G, G_kwargs, epsilon, space, sampling, crop, vgg16, dataset_kwargs):
+    def __init__(self, G, G_kwargs, latent_encoder, epsilon, space, sampling, crop, vgg16, dataset_kwargs):
         assert space in ['z', 'w']
         assert sampling in ['full', 'end']
         super().__init__()
         self.G = copy.deepcopy(G)
+        self.latent_encoder = latent_encoder
         self.G_kwargs = G_kwargs
         self.from_layer = G.enc_input_resolution_log2+1
         self.epsilon = epsilon
@@ -60,7 +61,8 @@ class PPLSampler(torch.nn.Module):
         while lq.shape[0] < bs:
             ims, lqs, lbls = next(self.dliter)
             lq = torch.cat([lqs, lq], dim=0).to(c.device)
-        enc_conv, enc_latent = self.G.do_encoder(lq, force_fp32=True, **self.G_kwargs)
+        enc_conv = self.G.do_encoder(lq, force_fp32=True, **self.G_kwargs)
+        enc_latent = self.latent_encoder(torch.nn.functional.interpolate(lq, size=(224,224), mode='bilinear', align_corners=False))
 
         # Generate random latents and interpolation t-values.
         t = torch.rand([c.shape[0]], device=c.device) * (1 if self.sampling == 'full' else 0)
@@ -85,6 +87,7 @@ class PPLSampler(torch.nn.Module):
 
         # Generate images.
         enc_conv = {k:v.repeat(2,1,1,1) for k,v in enc_conv.items()}
+
         img = self.G(ws=torch.cat([wt0,wt1]), enc_conv_outs=enc_conv, force_fp32=True, noise_mode='const', **self.G_kwargs)
 
         # Center crop.
@@ -116,7 +119,7 @@ def compute_ppl(opts, num_samples, epsilon, space, sampling, crop, batch_size, j
     vgg16 = metric_utils.get_feature_detector(vgg16_url, num_gpus=opts.num_gpus, rank=opts.rank, verbose=opts.progress.verbose)
 
     # Setup sampler.
-    sampler = PPLSampler(G=opts.G, G_kwargs=opts.G_kwargs, epsilon=epsilon, space=space, sampling=sampling, crop=crop, vgg16=vgg16, dataset_kwargs=opts.dataset_kwargs)
+    sampler = PPLSampler(G=opts.G, G_kwargs=opts.G_kwargs, latent_encoder=opts.latent_encoder, epsilon=epsilon, space=space, sampling=sampling, crop=crop, vgg16=vgg16, dataset_kwargs=opts.dataset_kwargs)
     sampler.eval().requires_grad_(False).to(opts.device)
     if jit:
         sampler = torch.jit.trace(sampler, [None], check_trace=False)

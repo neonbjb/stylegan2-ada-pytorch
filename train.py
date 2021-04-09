@@ -73,6 +73,7 @@ def setup_training_loop_kwargs(
     stop_synthesis_gradients_at_glean = True,
     stop_mapping_gradients_at_glean = True,
     grey_consistency_loss=False,
+    lq_encoder_pretrained_path=None,
 ):
     args = dnnlib.EasyDict()
     args.switched_conv_breadth = switched_conv_breadth
@@ -95,6 +96,7 @@ def setup_training_loop_kwargs(
         raise UserError('--snap must be at least 1')
     args.image_snapshot_ticks = snap
     args.network_snapshot_ticks = snap
+    args.lq_encoder_pretrained_path = lq_encoder_pretrained_path
 
     if metrics is None:
         metrics = ['fid10k_full']
@@ -478,6 +480,7 @@ class CommaSeparatedList(click.ParamType):
               help='Whether or not to stop the generator\'s mapping network parameters from being trained',
               type=bool, default=True, metavar='BOOL')
 @click.option('--grey_consistency_loss', help='When set, the LQ consistency loss averages the image channels (e.g. greyscale).', type=bool, default=False)
+@click.option('--lq_encoder_pretrained_path', help='Where the latent encoder for LQ images exists.', type=str)
 
 def main(ctx, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper

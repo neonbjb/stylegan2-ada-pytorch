@@ -19,9 +19,10 @@ import dnnlib
 #----------------------------------------------------------------------------
 
 class MetricOptions:
-    def __init__(self, G=None, G_kwargs={}, dataset_kwargs={}, num_gpus=1, rank=0, device=None, progress=None, cache=True):
+    def __init__(self, G=None, G_kwargs={}, latent_encoder=None, dataset_kwargs={}, num_gpus=1, rank=0, device=None, progress=None, cache=True):
         assert 0 <= rank < num_gpus
         self.G              = G
+        self.latent_encoder = latent_encoder
         self.G_kwargs       = dnnlib.EasyDict(G_kwargs)
         self.dataset_kwargs = dnnlib.EasyDict(dataset_kwargs)
         self.num_gpus       = num_gpus
@@ -242,11 +243,13 @@ def compute_feature_stats_for_generator(lqs, opts, detector_url, detector_kwargs
 
     # Setup generator and load labels.
     G = copy.deepcopy(opts.G).eval().requires_grad_(False).to(opts.device)
+    latent_encoder = opts.latent_encoder
     dataset = dnnlib.util.construct_class_by_name(**opts.dataset_kwargs)
 
     # Image generation func.
     def run_generator(z, c, lqs):
-        img = G(z=z, c=c, lq=lqs, **opts.G_kwargs)
+        lq_enc = latent_encoder(torch.nn.functional.interpolate(lqs, size=(224,224), mode='bilinear', align_corners=False))
+        img = G(z=z, c=c, lq=lqs, lq_latent=lq_enc, **opts.G_kwargs)
         img = (img * 127.5 + 128).clamp(0, 255).to(torch.uint8)
         return img
 
