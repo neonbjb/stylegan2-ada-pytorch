@@ -105,7 +105,7 @@ class SrGenerator(nn.Module):
         self.encoder = SrEncoder(0, enc_input_resolution, img_channels, channel_base=channel_base,
                                     channel_max=channel_max, block_kwargs=enc_block_kwargs,
                                     epilogue_kwargs=enc_epilogue_kwargs)
-        self.gen_bank = Generator(z_dim, c_dim, w_dim, img_resolution, img_channels, mapping_kwargs, synthesis_kwargs)
+        self.gen_bank = Generator(z_dim, w_dim, w_dim, img_resolution, img_channels, mapping_kwargs, synthesis_kwargs)
 
         # StyleGAN Generator Attachments
         conv_clamp = opt_get(synthesis_kwargs, ['block_kwargs', 'conv_clamp'], None)

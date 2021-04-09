@@ -238,3 +238,42 @@ class ImageFolderDataset(Dataset):
         return labels
 
 #----------------------------------------------------------------------------
+
+
+class ConvergedDataset(torch.utils.data.Dataset):
+    def __init__(self,
+        path,                   # Path to directory or zip.
+        path_lq,
+        resolution=None,
+        **super_kwargs,         # Additional arguments for the Dataset base class.
+    ):
+        self.hq_set = ImageFolderDataset(path, **super_kwargs)
+        self.lq_set = ImageFolderDataset(path_lq, **super_kwargs)
+        # I hate this shit but I'm too lazy to write this as a true passthrough class. Bad design on authors part, F-.
+        self.size = max(len(self.lq_set), len(self.hq_set))
+        self.resolution = self.hq_set.resolution
+        self.has_labels = self.hq_set.has_labels
+        self.name = self.hq_set.name
+        self.image_shape = self.hq_set.image_shape
+        self.label_shape = self.hq_set.label_shape
+        self.label_dim = self.hq_set.label_dim
+        self.has_onehot_labels = self.hq_set.has_onehot_labels
+        self.num_channels = self.hq_set.num_channels
+
+    def __len__(self):
+        return self.size
+
+    def __getitem__(self, idx):
+        hq, _, labels = self.hq_set[idx % len(self.hq_set)]
+        lq, _, _ = self.lq_set[idx % len(self.lq_set)]
+        return hq, lq, labels
+
+    def get_label(self, idx):
+        return self.hq_set.get_label(idx % len(self.hq_set))
+
+    def get_details(self, idx):
+        return self.hq_set.get_details(idx)
+
+    def close(self):
+        self.hq_set.close()
+        self.lq_set.close()
