@@ -114,10 +114,15 @@ def setup_training_loop_kwargs(
     # Dataset: data, cond, subset, mirror
     # -----------------------------------
 
-    assert data is not None and data_lq is not None
+    assert data is not None
     assert isinstance(data, str)
-    args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ConvergedDataset', path=data, path_lq=data_lq,
-                                               use_labels=True, max_size=None, xflip=False, lq_scale=glean_scale_factor)
+    if data_lq is None:
+        args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data,
+                                                   use_labels=True, max_size=None, xflip=False, lq_scale=glean_scale_factor)
+    else:
+        args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ConvergedDataset', path=data, path_lq=data_lq,
+                                                   use_labels=True, max_size=None, xflip=False, lq_scale=glean_scale_factor)
+
     args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=3, prefetch_factor=2)
     try:
         training_set = dnnlib.util.construct_class_by_name(**args.training_set_kwargs) # subclass of training.dataset.Dataset
@@ -434,7 +439,7 @@ class CommaSeparatedList(click.ParamType):
 
 # Dataset.
 @click.option('--data', help='Training data (directory or zip)', metavar='PATH', required=True)
-@click.option('--data_lq', help='LQ training data (directory or zip)', metavar='PATH', required=True)
+@click.option('--data_lq', help='LQ training data (directory or zip)', metavar='PATH')
 @click.option('--cond', help='Train conditional model based on dataset labels [default: false]', type=bool, metavar='BOOL')
 @click.option('--subset', help='Train with only N images [default: all]', type=int, metavar='INT')
 @click.option('--mirror', help='Enable dataset x-flips [default: false]', type=bool, metavar='BOOL')
