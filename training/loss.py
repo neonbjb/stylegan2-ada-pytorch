@@ -21,7 +21,7 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, G_lq_mse_weight=10):
+    def __init__(self, device, G, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, G_lq_mse_weight=10, sr_loss_avg_channels=False):
         super().__init__()
         self.device = device
         self.G = G
@@ -34,6 +34,7 @@ class StyleGAN2Loss(Loss):
         self.pl_weight = pl_weight
         self.pl_mean = torch.zeros([], device=device)
         self.g_lq_mse_weight = G_lq_mse_weight
+        self.sr_loss_avg_channels = sr_loss_avg_channels  # Useful when the LQ input does not share the same colorspace as the HQ reference images.
 
     def run_G(self, z, c, lq, sync):
         with misc.ddp_sync(self.G, sync):
@@ -65,8 +66,15 @@ class StyleGAN2Loss(Loss):
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gmain = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
                 training_stats.report('Loss/G/loss_gan', loss_Gmain)
-                loss_mse = torch.nn.functional.mse_loss(torch.nn.functional.interpolate(gen_img, size=real_img_lq.shape[2:], mode="area"),
-                                                        real_img_lq)
+                if self.sr_loss_avg_channels:
+                    mse_gen = gen_img.mean(dim=1, keepdims=True)
+                    mse_real = real_img_lq.mean(dim=1, keepdims=True)
+                    mse_factor = 3
+                else:
+                    mse_gen = gen_img
+                    mse_real = real_img_lq
+                    mse_factor = 1
+                loss_mse = torch.nn.functional.mse_loss(torch.nn.functional.interpolate(mse_gen, size=mse_real.shape[2:], mode="area"), mse_real) * mse_factor
                 training_stats.report("Loss/G/loss_lq_mse", loss_mse)
                 loss_Gtotal = loss_Gmain + loss_mse * self.g_lq_mse_weight
                 training_stats.report("Loss/G/loss", loss_Gtotal)
