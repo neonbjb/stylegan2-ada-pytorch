@@ -195,7 +195,8 @@ class MappingNetwork(torch.nn.Module):
 
         if layer_features is None:
             layer_features = w_dim
-        features_list = [z_dim + sr_dim] + [layer_features] * (num_layers - 1) + [w_dim]
+        self.embed = FullyConnectedLayer(sr_dim, w_dim)
+        features_list = [z_dim + w_dim] + [layer_features] * (num_layers - 1) + [w_dim]
 
         for idx in range(num_layers):
             in_features = features_list[idx]
@@ -214,7 +215,8 @@ class MappingNetwork(torch.nn.Module):
                 misc.assert_shape(z, [None, self.z_dim])
                 x = normalize_2nd_moment(z.to(torch.float32))
             misc.assert_shape(lq_emb, [None, self.sr_dim])
-            y = normalize_2nd_moment(lq_emb)
+            y = self.embed(lq_emb)
+            y = normalize_2nd_moment(y)
             x = torch.cat([x, y], dim=1) if x is not None else y
 
         # Main layers.
