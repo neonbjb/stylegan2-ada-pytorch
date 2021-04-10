@@ -6,3 +6,4 @@ work_dirs/*
 torch_utils/ops/build/*
 torch_utils/ops/dist/*
 torch_utils/ops/*.egg-info/*
+logs/*
