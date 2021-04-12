@@ -87,8 +87,13 @@ class Dataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         image = self._load_raw_image(self._raw_idx[idx])
         assert isinstance(image, np.ndarray)
-        assert list(image.shape) == self.image_shape
         assert image.dtype == np.uint8
+        # For square images, center-crop the height to make it a 4:3
+        if image.shape[-1] == image.shape[-2]:
+            margin = image.shape[-1] // 8
+            image = image[:,margin:-margin,:]
+        assert list(image.shape) == self.image_shape
+
         if self._xflip[idx]:
             assert image.ndim == 3 # CHW
             image = image[:, :, ::-1]
@@ -117,7 +122,9 @@ class Dataset(torch.utils.data.Dataset):
 
     @property
     def image_shape(self):
-        return list(self._raw_shape[1:])
+        actual_shape = list(self._raw_shape[1:])
+        actual_shape[1] = actual_shape[1] * 3 // 4
+        return actual_shape
 
     @property
     def num_channels(self):
@@ -127,8 +134,7 @@ class Dataset(torch.utils.data.Dataset):
     @property
     def resolution(self):
         assert len(self.image_shape) == 3 # CHW
-        assert self.image_shape[1] == self.image_shape[2]
-        return self.image_shape[1]
+        return self.image_shape[2]
 
     @property
     def label_shape(self):

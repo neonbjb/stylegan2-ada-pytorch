@@ -98,6 +98,11 @@ class SrGenerator(nn.Module):
                  enc_epilogue_kwargs={}
                  ):
         super().__init__()
+        self.img_resolution = img_resolution
+        self.img_resolution_log2 = int(np.log2(img_resolution))
+        self.enc_input_resolution_log2 = int(np.log2(enc_input_resolution))
+        self.img_channels = img_channels
+        self.block_resolutions = [2 ** i for i in range(2, self.img_resolution_log2 + 1)]
         self.freeze_synthesis_network = freeze_latent_dict
         self.freeze_mapping_network = freeze_mapping_network
         channel_base = opt_get(synthesis_kwargs, ['channel_base'], 32768)
@@ -105,30 +110,8 @@ class SrGenerator(nn.Module):
         self.encoder = SrEncoder(0, enc_input_resolution, img_channels, channel_base=channel_base,
                                     channel_max=channel_max, block_kwargs=enc_block_kwargs,
                                     epilogue_kwargs=enc_epilogue_kwargs)
+        synthesis_kwargs['encoder_attachment_resolutions'] = [2 ** i for i in range(self.enc_input_resolution_log2+1, 2, -1)]
         self.gen_bank = Generator(z_dim, w_dim, w_dim, img_resolution, img_channels, mapping_kwargs, synthesis_kwargs)
-
-        # StyleGAN Generator Attachments
-        conv_clamp = opt_get(synthesis_kwargs, ['block_kwargs', 'conv_clamp'], None)
-        channels_last = opt_get(synthesis_kwargs, ['block_kwargs', 'channels_last'], None)
-        layer_kwargs = opt_get(synthesis_kwargs, ['block_kwargs', 'layer_kwargs'], {})
-        self.img_resolution = img_resolution
-        self.img_resolution_log2 = int(np.log2(img_resolution))
-        self.enc_input_resolution_log2 = int(np.log2(enc_input_resolution))
-        self.img_channels = img_channels
-        self.enc_attachment_resolutions = [2 ** i for i in range(self.enc_input_resolution_log2, 1, -1)]
-        self.dec_attachment_resolutions = [2 ** i for i in
-                                           range(self.img_resolution_log2, self.enc_input_resolution_log2 - 1, -1)]
-        self.block_resolutions = [2 ** i for i in range(2, self.img_resolution_log2 + 1)]
-        channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions}
-
-        # Encoder attachments
-        self.enc_w_combiner = FullyConnectedLayer(w_dim * 2, w_dim, bias_init=0)
-        for res in self.enc_attachment_resolutions:
-            out_channels = channels_dict[res]
-            in_channels = out_channels * 2  # The input comes from both the previous gen bank output and the level-wise encoder output.
-            layer = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=res, conv_clamp=conv_clamp,
-                                   channels_last=channels_last, **layer_kwargs)
-            setattr(self, f'enc_attachment_{res}', layer)
 
     def do_encoder(self, lq, **synthesis_kwargs):
         block_args = opt_get(synthesis_kwargs, ['block_kwargs'], {})
@@ -176,7 +159,6 @@ class SrGenerator(nn.Module):
                 truncation_cutoff=None, return_ws=False, **synthesis_kwargs):
         force_fp32 = opt_get(synthesis_kwargs, ['force_fp32'], False)
         block_args = opt_get(synthesis_kwargs, ['block_kwargs'], {'force_fp32': force_fp32})
-        layer_args = opt_get(block_args, ['layer_kwargs'], {})
 
         assert (z is not None and lq is not None) or (ws is not None and enc_conv_outs is not None)
         if lq is not None:
@@ -207,66 +189,15 @@ class SrGenerator(nn.Module):
         x = img = None
         for res, cur_ws in zip(synth.block_resolutions, block_ws):
             first = res == 4
+            eres = res // 2
+            if not first and eres in conv_outs.keys():
+                x = torch.cat([x, conv_outs[eres]], dim=1)
             synblock = getattr(synth, f'b{res}')
-            if first:
-                x, img = synblock(x, img, cur_ws, **block_args)
-                # TODO: FIX ME - this needs to get the x output of the synblock to match the original lq image input.
-                #x = torch.nn.functional.interpolate(x, scale_factor=4, mode='bilinear')
-                #img = torch.nn.functional.interpolate(img, scale_factor=4, mode='bilinear')
-            else:
-                # First, convert to the correct memory format and dtype. The synthesis network would normally have done this for us, but we're prepending it.
-                dtype = torch.float16 if synblock.use_fp16 and not force_fp32 else torch.float32
-                memory_format = torch.channels_last if synblock.channels_last and not force_fp32 else torch.contiguous_format
-                x = x.to(dtype=dtype, memory_format=memory_format)
-
-                # Encoder attachment
-                eres = res // 2
-                if eres in conv_outs.keys():
-                    x = torch.cat([x, conv_outs[eres].to(dtype=dtype, memory_format=memory_format)], dim=1)
-                    # x = torch.cat([x, conv_outs[eres]], dim=1)
-                    layer = getattr(self, f'enc_attachment_{eres}')
-                    enc_w = cur_ws[:,0,:]  # Just use the first block's w for the encoder attachment.
-                    x = layer(x, enc_w, **layer_args)
-
-                # Call into the synthesis blocks.
-                x, img = synblock(x, img, cur_ws, puppet=True, **block_args)
+            x, img = synblock(x, img, cur_ws, **block_args)
         if return_ws:
             return img, ws
         else:
             return img
-
-
-def convert_stylegan2_pickle(pkl, enc_input_resolution):
-    with dnnlib.util.open_url(pkl) as f:
-        resume_data = legacy.load_network_pkl(f)
-    G = dnnlib.util.construct_class_by_name(class_name='training.gan_sr.SrGenerator',
-                                            enc_input_resolution=enc_input_resolution, **resume_data['G'].init_kwargs)
-    G_ema = copy.deepcopy(G).eval()
-    for name, module in [('G_ema', G.gen_bank),
-                         ('G_ema', G_ema.gen_bank)]:  # Note: both G and G_ema start from the saved G_ema intentionally.
-        module.load_state_dict(resume_data[name].state_dict(), strict=True)
-
-    # Discriminator is a special case - we want to copy the parameters from the lower half of the network, but leave
-    # the new init in the upper half.
-    D = dnnlib.util.construct_class_by_name(class_name='training.networks.Discriminator',
-                                            stop_training_at=enc_input_resolution, **resume_data['D'].init_kwargs)
-    pretrained_sd = resume_data['D'].state_dict()
-    scrubbed_sd = OrderedDict()
-    for k, v in pretrained_sd.items():
-        block_res = int(k.split('.')[0][1:])
-        if block_res <= enc_input_resolution:  # This intentionally mismatches with the Discriminator "stop_training_at" implementation: We load the pretrained weights *at* the encoder dimension *and* train at that dimension.
-            scrubbed_sd[k] = v
-    D.load_state_dict(scrubbed_sd, strict=False)
-
-    # Save snapshot.
-    snapshot_data = dict(training_set_kwargs=resume_data['training_set_kwargs'])
-    for name, module in [('G', G), ('D', D), ('G_ema', G_ema), ('augment_pipe', resume_data['augment_pipe'])]:
-        if module is not None:
-            module = copy.deepcopy(module).eval().requires_grad_(False).cpu()
-        snapshot_data[name] = module
-        del module  # conserve memory
-    with open('converted-0.pkl', 'wb') as f:
-        pickle.dump(snapshot_data, f)
 
 
 if __name__ == '__main__':
@@ -287,7 +218,7 @@ if __name__ == '__main__':
     gen = SrGenerator(**args).to('cuda')
     z = torch.rand((1,512)).to('cuda')
     c = torch.zeros((1,0)).to('cuda')
-    lq = torch.rand((1,3,64,64)).to('cuda')
+    lq = torch.rand((1,3,48,64)).to('cuda')
     #gen(z, None, lq, truncation_psi=1, truncation_cutoff=None)
     # Also test the style mixing method
     enc_c, enc_l = gen.do_encoder(lq=lq)
