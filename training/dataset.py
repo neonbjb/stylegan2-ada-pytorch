@@ -122,6 +122,8 @@ class Dataset(torch.utils.data.Dataset):
 
     @property
     def image_shape(self):
+        if self._raw_shape[-1] != self._raw_shape[-2]:
+            return self._raw_shape[1:]
         actual_shape = list(self._raw_shape[1:])
         actual_shape[1] = actual_shape[1] * 3 // 4
         return actual_shape

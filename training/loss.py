@@ -38,9 +38,13 @@ class StyleGAN2Loss(Loss):
         self.sr_loss_additional_downsampling_factor = sr_loss_additional_downsampling_factor
 
     def run_G(self, z, c, lq, sync):
+        if hasattr(self.G, 'module'):
+            rawG = self.G.module
+        else:
+            rawG = self.G
         with misc.ddp_sync(self.G, sync):
-            enc_c, enc_l = self.G.do_encoder(lq=lq)
-            ws = self.G.do_latent_mapping_with_mixing(z=z, enc_latent=enc_l, mixing_prob=self.style_mixing_prob)
+            enc_c, enc_l = rawG.do_encoder(lq=lq)
+            ws = rawG.do_latent_mapping_with_mixing(z=z, enc_latent=enc_l, mixing_prob=self.style_mixing_prob)
             img = self.G(ws=ws, enc_conv_outs=enc_c)
         return img, ws
 
