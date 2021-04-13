@@ -206,7 +206,7 @@ if __name__ == '__main__':
         'w_dim': 512,
         'img_resolution': 256,
         'img_channels': 3,
-        'enc_input_resolution': 64,
+        'enc_input_resolution': 128,
         'mapping_kwargs': {'num_layers': 8},
         'synthesis_kwargs': {
             'channel_base': 16384,
@@ -218,7 +218,7 @@ if __name__ == '__main__':
     gen = SrGenerator(**args).to('cuda')
     z = torch.rand((1,512)).to('cuda')
     c = torch.zeros((1,0)).to('cuda')
-    lq = torch.rand((1,3,48,64)).to('cuda')
+    lq = torch.rand((1,3,96,128)).to('cuda')
     #gen(z, None, lq, truncation_psi=1, truncation_cutoff=None)
     # Also test the style mixing method
     enc_c, enc_l = gen.do_encoder(lq=lq)
