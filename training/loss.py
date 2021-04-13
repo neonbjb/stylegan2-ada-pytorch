@@ -80,7 +80,7 @@ class StyleGAN2Loss(Loss):
                     mse_real = real_img_lq
                     mse_factor = 1
                 if self.sr_loss_additional_downsampling_factor != 1:
-                    mse_real = torch.nn.functional.interpolate(mse_real, scale_factor=self.sr_loss_additional_downsampling_factor, mode="area")
+                    mse_real = torch.nn.functional.interpolate(mse_real, scale_factor=self.sr_loss_additional_downsampling_factor, mode="area", recompute_scale_factor=False)
                 loss_mse = torch.nn.functional.mse_loss(torch.nn.functional.interpolate(mse_gen, size=mse_real.shape[2:], mode="area"), mse_real) * mse_factor
                 training_stats.report("Loss/G/loss_lq_mse", loss_mse)
                 loss_Gtotal = loss_Gmain + loss_mse * self.g_lq_mse_weight
