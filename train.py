@@ -73,6 +73,7 @@ def setup_training_loop_kwargs(
     stop_synthesis_gradients_at_glean = True,
     stop_mapping_gradients_at_glean = True,
     grey_consistency_loss=False,
+    sr_loss_additional_downsampling_factor=1
 ):
     args = dnnlib.EasyDict()
     args.switched_conv_breadth = switched_conv_breadth
@@ -215,6 +216,7 @@ def setup_training_loop_kwargs(
     args.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0,0.99], eps=1e-8)
     args.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss', r1_gamma=spec.gamma)
     args.loss_kwargs.sr_loss_avg_channels = grey_consistency_loss
+    args.loss_kwargs.sr_loss_additional_downsampling_factor = sr_loss_additional_downsampling_factor
 
     args.total_kimg = spec.kimg
     args.batch_size = spec.mb
@@ -484,6 +486,7 @@ class CommaSeparatedList(click.ParamType):
               help='Whether or not to stop the generator\'s mapping network parameters from being trained',
               type=bool, default=True, metavar='BOOL')
 @click.option('--grey_consistency_loss', help='When set, the LQ consistency loss averages the image channels (e.g. greyscale).', type=bool, default=False)
+@click.option('--sr_loss_additional_downsampling_factor', help='When set, the LQ consistency loss additionally downsamples the LQ image by this factor.', type=float, default=1)
 
 def main(ctx, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper

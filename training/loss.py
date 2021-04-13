@@ -21,7 +21,7 @@ class Loss:
 #----------------------------------------------------------------------------
 
 class StyleGAN2Loss(Loss):
-    def __init__(self, device, G, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, G_lq_mse_weight=10, sr_loss_avg_channels=False):
+    def __init__(self, device, G, D, augment_pipe=None, style_mixing_prob=0.9, r1_gamma=10, pl_batch_shrink=2, pl_decay=0.01, pl_weight=2, G_lq_mse_weight=10, sr_loss_avg_channels=False, sr_loss_additional_downsampling_factor=1):
         super().__init__()
         self.device = device
         self.G = G
@@ -35,6 +35,7 @@ class StyleGAN2Loss(Loss):
         self.pl_mean = torch.zeros([], device=device)
         self.g_lq_mse_weight = G_lq_mse_weight
         self.sr_loss_avg_channels = sr_loss_avg_channels  # Useful when the LQ input does not share the same colorspace as the HQ reference images.
+        self.sr_loss_additional_downsampling_factor = sr_loss_additional_downsampling_factor
 
     def run_G(self, z, c, lq, sync):
         with misc.ddp_sync(self.G, sync):
@@ -74,6 +75,8 @@ class StyleGAN2Loss(Loss):
                     mse_gen = gen_img
                     mse_real = real_img_lq
                     mse_factor = 1
+                if self.sr_loss_additional_downsampling_factor != 1:
+                    mse_real = torch.nn.functional.interpolate(mse_real, scale_factor=self.sr_loss_additional_downsampling_factor, mode="area")
                 loss_mse = torch.nn.functional.mse_loss(torch.nn.functional.interpolate(mse_gen, size=mse_real.shape[2:], mode="area"), mse_real) * mse_factor
                 training_stats.report("Loss/G/loss_lq_mse", loss_mse)
                 loss_Gtotal = loss_Gmain + loss_mse * self.g_lq_mse_weight
