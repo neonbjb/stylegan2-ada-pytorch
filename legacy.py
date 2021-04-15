@@ -46,6 +46,12 @@ def load_network_pkl(f, force_fp16=False, device=None):
         for key in ['G', 'D', 'G_ema']:
             if device is not None:
                 data[key] = data[key].to(device)
+                opt_key = f'{key}_opt'
+                if opt_key in data.keys():
+                    for sk, sv in data[opt_key]['state'].items():
+                        for tk, tv in sv:
+                            if torch.is_tensor(tv):
+                                data[opt_key]['state'][sk][tk] = tv.to(device)
             old = data[key]
             kwargs = copy.deepcopy(old.init_kwargs)
             if key.startswith('G'):
