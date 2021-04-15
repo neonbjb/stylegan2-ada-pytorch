@@ -17,7 +17,7 @@ from torch_utils import misc
 
 #----------------------------------------------------------------------------
 
-def load_network_pkl(f, force_fp16=False):
+def load_network_pkl(f, force_fp16=False, device=None):
     data = _LegacyUnpickler(f).load()
 
     # Legacy TensorFlow pickle => convert.
@@ -44,6 +44,8 @@ def load_network_pkl(f, force_fp16=False):
     # Force FP16.
     if force_fp16:
         for key in ['G', 'D', 'G_ema']:
+            if device is not None:
+                data[key] = data[key].to(device)
             old = data[key]
             kwargs = copy.deepcopy(old.init_kwargs)
             if key.startswith('G'):
