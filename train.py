@@ -29,6 +29,7 @@ class UserError(Exception):
 
 #----------------------------------------------------------------------------
 
+
 def setup_training_loop_kwargs(
     # General options (not included in desc).
     gpus       = None, # Number of GPUs: <int>, default = 1 gpu

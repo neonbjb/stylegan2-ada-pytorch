@@ -28,6 +28,21 @@ from metrics import metric_main
 from training.switched_conv import SwitchedConvConversionWrapper
 
 
+def optimizer_to(optim, device):
+    for param in optim.state.values():
+        # Not sure there are any global tensors in the state dict
+        if isinstance(param, torch.Tensor):
+            param.data = param.data.to(device)
+            if param._grad is not None:
+                param._grad.data = param._grad.data.to(device)
+        elif isinstance(param, dict):
+            for subparam in param.values():
+                if isinstance(subparam, torch.Tensor):
+                    subparam.data = subparam.data.to(device)
+                    if subparam._grad is not None:
+                        subparam._grad.data = subparam._grad.data.to(device)
+
+
 def setup_snapshot_image_grid(training_set, random_seed=0):
     rnd = np.random.RandomState(random_seed)
     gw = np.clip(7680 // training_set.image_shape[2], 7, 32)
@@ -229,6 +244,7 @@ def training_loop(
             phases += [dnnlib.EasyDict(name=name+'reg', module=module, opt=opt, interval=reg_interval)]
         if (resume_pkl is not None) and f'{name}_opt' in resume_data.keys():
             opt.load_state_dict(resume_data[f'{name}_opt'])
+            optimizer_to(opt, device)
         optimizers[name] = opt
     for phase in phases:
         phase.start_event = None
