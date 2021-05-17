@@ -9,6 +9,7 @@ import enum
 import math
 
 import numpy as np
+import torch
 import torch as th
 from torch.nn.functional import interpolate
 
@@ -132,6 +133,22 @@ def betas_for_alpha_bar(num_diffusion_timesteps, alpha_bar, max_beta=0.999):
         t2 = (i + 1) / num_diffusion_timesteps
         betas.append(min(1 - alpha_bar(t2) / alpha_bar(t1), max_beta))
     return np.array(betas)
+
+
+def _extract_into_tensor(arr, timesteps, broadcast_shape):
+    """
+    Extract values from a 1-D numpy array for a batch of indices.
+
+    :param arr: the 1-D numpy array.
+    :param timesteps: a tensor of indices into the array to extract.
+    :param broadcast_shape: a larger shape of K dimensions with the batch
+                            dimension equal to the length of timesteps.
+    :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
+    """
+    res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
+    while len(res.shape) < len(broadcast_shape):
+        res = res[..., None]
+    return res.expand(broadcast_shape)
 
 
 class ModelMeanType(enum.Enum):
@@ -285,13 +302,20 @@ class GaussianDiffusion:
         Similar to q_sample, but produces two samples: x_t and x_(t+1).
         Two different noise sources are used. One to diffuse cumulatively to x_t, and a second one to diffuse to x_(t+1)
         """
-        if noise is None:
-            noise = th.randn_like(x_start)
+        if noise1 is None:
+            noise1 = th.randn_like(x_start)
+        if noise2 is None:
+            noise2 = th.randn_like(x_start)
         x_t = self.q_sample(x_start, t, noise1)
-        x_t1 = x_t * np.sqrt(self._extract_to_tensor(self.alphas, t+1, x_t.shape)) + \
-               np.sqrt(1-self._extract_into_tensor(self.alphas, t+1, x_t.shape)) * noise2
+        pmc1 = _extract_into_tensor(self.posterior_mean_coef1, t+1, x_t.shape)
+        pmc2 = _extract_into_tensor(self.posterior_mean_coef2, t+1, x_t.shape)
+        acum = _extract_into_tensor(self.sqrt_recip_alphas_cumprod, t+1, x_t.shape)
+        acumm1 = _extract_into_tensor(self.sqrt_recipm1_alphas_cumprod, t+1, x_t.shape)
+        x_t1 = (x_t+noise2*acumm1*pmc1)/(pmc1*acum+pmc2)
+        #x_t1 = self.ddim_reverse_sample(lambda *k, **kw: noise2, x_t, t+1)['sample']
+        #test_xt = self.p_sample(lambda *k, **kw: noise2, x_t1, t+1)['sample']
+        #test_xt = self.ddim_sample(lambda *k, **kw: noise2, x_t1, t+1)
         return x_t, x_t1
-
 
 
     def q_posterior_mean_variance(self, x_start, x_t, t):
@@ -997,17 +1021,22 @@ class GaussianDiffusion:
         }
 
 
-def _extract_into_tensor(arr, timesteps, broadcast_shape):
-    """
-    Extract values from a 1-D numpy array for a batch of indices.
+if __name__ == '__main__':
+    diffuser = GaussianDiffusion(betas=get_named_beta_schedule('cosine', 2000),
+                                      model_mean_type=ModelMeanType.EPSILON,
+                                      model_var_type=ModelVarType.FIXED_SMALL,
+                                      loss_type=LossType.MSE)
+    torch.manual_seed(0)
+    n=torch.randn((1,3,64,64))
+    n2=torch.randn((1,3,64,64))
+    x=torch.randn((1,3,64,64))
+    x200=diffuser.q_sample(x, th.LongTensor([200]), noise=n)
+    x201=diffuser.q_sample(x, th.LongTensor([201]), noise=n)
+    dx=x201-x200
 
-    :param arr: the 1-D numpy array.
-    :param timesteps: a tensor of indices into the array to extract.
-    :param broadcast_shape: a larger shape of K dimensions with the batch
-                            dimension equal to the length of timesteps.
-    :return: a tensor of shape [batch_size, 1, ...] where the shape has K dims.
-    """
-    res = th.from_numpy(arr).to(device=timesteps.device)[timesteps].float()
-    while len(res.shape) < len(broadcast_shape):
-        res = res[..., None]
-    return res.expand(broadcast_shape)
+    xt200,xt201=diffuser.q_sample_two(x, th.LongTensor([200]), noise1=n, noise2=n2)
+    dxt=xt201-xt200
+
+    dd=dx-dxt
+    print('hi')
+
