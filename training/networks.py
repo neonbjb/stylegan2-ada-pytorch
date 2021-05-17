@@ -176,7 +176,6 @@ class Conv2dLayer(torch.nn.Module):
 class MappingNetwork(torch.nn.Module):
     def __init__(self,
         z_dim,                      # Input latent (Z) dimensionality, 0 = no latent.
-        sr_dim,                     # LR Conditioning label (C) dimensionality
         w_dim,                      # Intermediate latent (W) dimensionality.
         num_ws,                     # Number of intermediate latents to output, None = do not broadcast.
         num_layers      = 8,        # Number of mapping layers.
@@ -187,7 +186,6 @@ class MappingNetwork(torch.nn.Module):
     ):
         super().__init__()
         self.z_dim = z_dim
-        self.sr_dim = sr_dim
         self.w_dim = w_dim
         self.num_ws = num_ws
         self.num_layers = num_layers
@@ -195,8 +193,7 @@ class MappingNetwork(torch.nn.Module):
 
         if layer_features is None:
             layer_features = w_dim
-        self.embed = FullyConnectedLayer(sr_dim, w_dim)
-        features_list = [z_dim + w_dim] + [layer_features] * (num_layers - 1) + [w_dim]
+        features_list = [z_dim] + [layer_features] * (num_layers - 1) + [w_dim]
 
         for idx in range(num_layers):
             in_features = features_list[idx]
@@ -207,17 +204,13 @@ class MappingNetwork(torch.nn.Module):
         if num_ws is not None and w_avg_beta is not None:
             self.register_buffer('w_avg', torch.zeros([w_dim]))
 
-    def forward(self, z, lq_emb, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False, skip_trunc_and_broadcast=False):
+    def forward(self, z, truncation_psi=1, truncation_cutoff=None, skip_w_avg_update=False, skip_trunc_and_broadcast=False):
         # Embed, normalize, and concat inputs.
         x = None
         with torch.autograd.profiler.record_function('input'):
             if self.z_dim > 0:
                 misc.assert_shape(z, [None, self.z_dim])
                 x = normalize_2nd_moment(z.to(torch.float32))
-            misc.assert_shape(lq_emb, [None, self.sr_dim])
-            y = self.embed(lq_emb)
-            y = normalize_2nd_moment(y)
-            x = torch.cat([x, y], dim=1) if x is not None else y
 
         # Main layers.
         for idx in range(self.num_layers):
@@ -499,7 +492,6 @@ class SynthesisNetwork(torch.nn.Module):
 class Generator(torch.nn.Module):
     def __init__(self,
         z_dim,                      # Input latent (Z) dimensionality.
-        sr_dim,
         w_dim,                      # Intermediate latent (W) dimensionality.
         img_resolution,             # Output resolution.
         img_channels,               # Number of output color channels.
@@ -508,13 +500,12 @@ class Generator(torch.nn.Module):
     ):
         super().__init__()
         self.z_dim = z_dim
-        self.sr_dim = sr_dim
         self.w_dim = w_dim
         self.img_resolution = img_resolution
         self.img_channels = img_channels
         self.synthesis = SynthesisNetwork(w_dim=w_dim, img_resolution=img_resolution, img_channels=img_channels, **synthesis_kwargs)
         self.num_ws = self.synthesis.num_ws
-        self.mapping = MappingNetwork(z_dim=z_dim, sr_dim=sr_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
+        self.mapping = MappingNetwork(z_dim=z_dim, w_dim=w_dim, num_ws=self.num_ws, **mapping_kwargs)
 
     def forward(self, z, c, truncation_psi=1, truncation_cutoff=None, **synthesis_kwargs):
         ws = self.mapping(z, c, truncation_psi=truncation_psi, truncation_cutoff=truncation_cutoff)
@@ -710,6 +701,7 @@ class Discriminator(torch.nn.Module):
         stop_training_at    = 0,        # Resolution below which grads will no longer be accumulated.
     ):
         super().__init__()
+        img_channels *= 3  # Actual input channels is 3x the specified channels: the predicted noise diffusion from the generator (or the real noise diffusion), the prior post-diffusion image, and the original seed image.
         self.c_dim = c_dim
         self.img_resolution = img_resolution
         self.img_resolution_log2 = int(np.log2(img_resolution))
@@ -736,10 +728,11 @@ class Discriminator(torch.nn.Module):
             setattr(self, f'b{res}', block)
             cur_layer_idx += block.num_layers
         if c_dim > 0:
-            self.mapping = MappingNetwork(z_dim=0, sr_dim=c_dim, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
+            self.mapping = MappingNetwork(z_dim=0, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
 
-    def forward(self, img, c, **block_kwargs):
+    def forward(self, eps, prior, img, **block_kwargs):
+        img = torch.cat([eps, prior, img], dim=1)
         x = None
         for res in self.block_resolutions:
             block = getattr(self, f'b{res}')
@@ -752,8 +745,6 @@ class Discriminator(torch.nn.Module):
             for p in self.b4.parameters():
                 p.requires_grad = False
         cmap = None
-        if self.c_dim > 0:
-            cmap = self.mapping(None, c)
         x = self.b4(x, img, cmap)
         return x
 

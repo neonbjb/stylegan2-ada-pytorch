@@ -10,6 +10,7 @@
 
 import os
 import re
+from glob import glob
 from typing import List, Optional
 
 import click
@@ -23,7 +24,7 @@ import torch
 import legacy
 
 #----------------------------------------------------------------------------
-from training.gan_sr import SrGenerator
+from training.gan_diffuse import DiffusionGenerator
 from training.glean_networks import GleanGenerator
 
 
@@ -48,7 +49,6 @@ def num_range(s: str) -> List[int]:
 @click.option('--noise-mode', help='Noise mode', type=click.Choice(['const', 'random', 'none']), default='const', show_default=True)
 @click.option('--projected-w', help='Projection result file', type=str, metavar='FILE')
 @click.option('--outdir', help='Where to save the output images', type=str, required=True, metavar='DIR')
-@click.option('--latent_starting_dim', help="The LQ image dimension the network was trained at", type=int, required=True)
 def generate_images(
     ctx: click.Context,
     network_pkl: str,
@@ -57,8 +57,7 @@ def generate_images(
     noise_mode: str,
     outdir: str,
     lq_path: str,
-    projected_w: Optional[str],
-    latent_starting_dim: int
+    projected_w: Optional[str]
 ):
     """Generate images using pretrained network pickle.
 
@@ -89,13 +88,13 @@ def generate_images(
     device = torch.device('cuda')
     with dnnlib.util.open_url(network_pkl) as f:
         G = legacy.load_network_pkl(f)['G_ema'].to(device) # type: ignore
+    '''
     args = {
         'z_dim': 512,
-        'sr_dim': 0,
         'w_dim': 512,
-        'img_resolution': 64,
+        'img_resolution': 512,
         'img_channels': 3,
-        'enc_input_resolution': 16,
+        'enc_input_resolution': 128,
         'mapping_kwargs': {'num_layers': 2},
         'synthesis_kwargs': {
             'channel_base': 16384,
@@ -107,6 +106,7 @@ def generate_images(
     G_nat = SrGenerator(**args)
     G_nat.load_state_dict(G.state_dict())
     G = G_nat.to('cuda')
+    '''
 
     os.makedirs(outdir, exist_ok=True)
 
@@ -128,20 +128,33 @@ def generate_images(
         ctx.fail('--seeds option is required when not using --projected-w')
 
     # LQ
-    lq_img = PIL.Image.open(lq_path)
-    lq = transforms.PILToTensor()(lq_img).cuda().unsqueeze(0).float() / 127.5 - 1
-    lq_for_latent = torch.nn.functional.interpolate(lq, size=(latent_starting_dim, latent_starting_dim), mode="bilinear")
+    img_paths = glob(f'{lq_path}/*.png') + glob(f'{lq_path}/*.jpg')
+    lq_imgs = []
+    res = G.img_resolution // 4
+    hres = res * 3 // 4
+    for path in img_paths:
+        lq_img = PIL.Image.open(path)
+        lq = transforms.PILToTensor()(lq_img).cuda().unsqueeze(0).float() / 127.5 - 1
+        if lq.shape[-2] > hres:
+            lq = torch.nn.functional.interpolate(lq, scale_factor=hres/lq.shape[-2], mode='area')
+        if lq.shape[-1] != res:
+            lq = lq[:,:,:,:res]
+        if lq.shape[-2] != hres:
+            margin = (hres - lq.shape[-2]) // 2
+            assert margin > 0
+            lq = lq[:,:,margin:-margin,:]
+        lq_imgs.append(lq[:,:3,:,:])
 
     # Generate images.
-    for seed_idx, seed in enumerate(seeds):
-        print('Generating image for seed %d (%d/%d) ...' % (seed, seed_idx, len(seeds)))
-        z = torch.from_numpy(np.random.RandomState(seed).randn(1, G.gen_bank.z_dim)).to(device)
-        _, latent = G.do_encoder(lq_for_latent)
-        conv_outs, _ = G.do_encoder_no_latent(lq)
-        ws = G.do_latent_mapping_for_single(z=z, enc_latent=latent, truncation_psi=truncation_psi)
-        img = G(ws=ws, enc_conv_outs=conv_outs)
-        img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
-        PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/seed{seed:04d}.png')
+    for lq_ind, lq in enumerate(lq_imgs):
+        for seed_idx, seed in enumerate(seeds):
+            print('Generating image for seed %d (%d/%d) ...' % (seed, seed_idx, len(seeds)))
+            z = torch.from_numpy(np.random.RandomState(seed).randn(1, G.gen_bank.z_dim)).to(device)
+            enc_c, enc_l = G.do_encoder(lq=lq)
+            ws = G.do_latent_mapping_for_single(z=z, enc_latent=enc_l, truncation_psi=truncation_psi)
+            img = G(ws=ws, enc_conv_outs=enc_c)
+            img = (img.permute(0, 2, 3, 1) * 127.5 + 128).clamp(0, 255).to(torch.uint8)
+            PIL.Image.fromarray(img[0].cpu().numpy(), 'RGB').save(f'{outdir}/{lq_ind}_seed{seed:04d}.png')
 
 
 #----------------------------------------------------------------------------

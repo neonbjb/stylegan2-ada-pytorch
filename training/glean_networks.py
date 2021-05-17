@@ -91,16 +91,12 @@ class GleanGenerator(nn.Module):
                  img_resolution,  # Output resolution.
                  img_channels,  # Number of output color channels.
                  enc_input_resolution,
-                 freeze_latent_dict=True,  # Whether or not the latent dict should be trained.
-                 freeze_mapping_network=True,
                  mapping_kwargs={},  # Arguments for MappingNetwork.
                  synthesis_kwargs={},  # Arguments for SynthesisNetwork.
                  enc_block_kwargs={},
                  enc_epilogue_kwargs={}
                  ):
         super().__init__()
-        self.freeze_synthesis_network = freeze_latent_dict
-        self.freeze_mapping_network = freeze_mapping_network
         channel_base = opt_get(synthesis_kwargs, ['channel_base'], 32768)
         channel_max = opt_get(synthesis_kwargs, ['channel_max'], 512)
         self.encoder = GleanEncoder(c_dim, enc_input_resolution, img_channels, channel_base=channel_base,
@@ -154,11 +150,6 @@ class GleanGenerator(nn.Module):
 
     def do_latent_mapping_for_single(self, z, enc_latent, truncation_psi=1, truncation_cutoff=None,
                                      skip_w_avg_update=False):
-        if self.freeze_mapping_network:
-            for p in self.gen_bank.mapping.parameters():
-                p.requires_grad = False
-            self.gen_bank.mapping.eval()
-
         ws = self.gen_bank.mapping(z, None, skip_trunc_and_broadcast=True, skip_w_avg_update=skip_w_avg_update)
         if enc_latent is not None:   # YOU SHOULD NOT DO enc_latent=None UNLESS YOU REALLY KNOW WHAT YOU ARE DOING. THE ENCODER LAYERS MUST USE THE ENCODER LATENT FOR GLEAN TO WORK.
             wse = self.enc_w_combiner(torch.cat([ws, enc_latent], dim=-1))
@@ -209,11 +200,6 @@ class GleanGenerator(nn.Module):
         if z is not None:
             # This is actually a z (most likely) - convert it automagically.
             ws = self.do_latent_mapping_for_single(z, enc_latent, truncation_psi, truncation_cutoff)
-
-        if self.freeze_synthesis_network:
-            for p in self.gen_bank.synthesis.parameters():
-                p.requires_grad = False
-            self.gen_bank.synthesis.eval()
 
         # Split the latents.
         synth = self.gen_bank.synthesis

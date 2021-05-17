@@ -67,26 +67,6 @@ def setup_snapshot_image_grid(training_set, random_seed=0):
 
 #----------------------------------------------------------------------------
 
-def save_image_grid(img, fname, drange, grid_size):
-    lo, hi = drange
-    img = np.asarray(img, dtype=np.float32)
-    img = (img - lo) * (255 / (hi - lo))
-    img = np.rint(img).clip(0, 255).astype(np.uint8)
-
-    gw, gh = grid_size
-    _N, C, H, W = img.shape
-    img = img.reshape(gh, gw, C, H, W)
-    img = img.transpose(0, 3, 1, 4, 2)
-    img = img.reshape(gh * H, gw * W, C)
-
-    assert C in [1, 3]
-    if C == 1:
-        PIL.Image.fromarray(img[:, :, 0], 'L').save(fname)
-    if C == 3:
-        PIL.Image.fromarray(img, 'RGB').save(fname)
-
-#----------------------------------------------------------------------------
-
 def training_loop(
     run_dir                 = '.',      # Output directory.
     training_set_kwargs     = {},       # Options for training set.
@@ -120,8 +100,6 @@ def training_loop(
     allow_tf32              = False,    # Enable torch.backends.cuda.matmul.allow_tf32 and torch.backends.cudnn.allow_tf32?
     abort_fn                = None,     # Callback function for determining whether to abort training. Must return consistent results across ranks.
     progress_fn             = None,     # Callback function for updating training progress. Called for all ranks.
-    switched_conv_breadth   = None,
-    glean_scale_factor      = 8,
 ):
     # Initialize.
     start_time = time.time()
@@ -133,7 +111,7 @@ def training_loop(
     torch.backends.cudnn.allow_tf32 = allow_tf32        # Allow PyTorch to internally use tf32 for convolutions
     conv2d_gradfix.enabled = True                       # Improves training speed.
     grid_sample_gradfix.enabled = True                  # Avoids errors with the augmentation pipe.
-    lq_res = G_kwargs['enc_input_resolution']
+    img_resolution = training_set_kwargs['resolution']
 
     # Load training set.
     if rank == 0:
@@ -155,14 +133,8 @@ def training_loop(
     G = dnnlib.util.construct_class_by_name(**G_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
     G_ema = copy.deepcopy(G).eval()
     D = dnnlib.util.construct_class_by_name(**D_kwargs, **common_kwargs).train().requires_grad_(False).to(device) # subclass of torch.nn.Module
-    if switched_conv_breadth is not None:
-        G_wrap = SwitchedConvConversionWrapper(G, switched_conv_breadth, ['synthesis.b128.conv1', 'synthesis.b128.conv0'], coupler_mode='lambda', dropout_rate=0)
-        #G_wrap = SwitchedConvConversionWrapper(G, switched_conv_breadth, ['synthesis.b128.conv1'], coupler_mode='lambda', dropout_rate=0)
-        G_ema_wrap = SwitchedConvConversionWrapper(G_ema, switched_conv_breadth, ['synthesis.b128.conv1', 'synthesis.b128.conv0'], coupler_mode='lambda', dropout_rate=0)
-        #G_ema_wrap = SwitchedConvConversionWrapper(G_ema, switched_conv_breadth, ['synthesis.b128.conv1'], coupler_mode='lambda', dropout_rate=0)
-    else:
-        G_wrap = G
-        G_ema_wrap = G_ema
+    G_wrap = G
+    G_ema_wrap = G_ema
     G_ema.eval()
     for p in G_ema.parameters():
         p.requires_grad = False
@@ -182,9 +154,9 @@ def training_loop(
     # Print network summary tables.
     if rank == 0:
         z = torch.empty([batch_gpu, G.gen_bank.z_dim], device=device)
-        lq = torch.empty([batch_gpu, 3, 3*lq_res//4, lq_res], device=device)
+        lq = torch.empty([batch_gpu, 3, 3*img_resolution//4, img_resolution], device=device)
         img = misc.print_module_summary(G, [z, None, lq])
-        misc.print_module_summary(D, [img, None])
+        misc.print_module_summary(D, [img, img, img])
 
     # Setup augmentation.
     if rank == 0:
@@ -236,21 +208,6 @@ def training_loop(
         if rank == 0:
             phase.start_event = torch.cuda.Event(enable_timing=True)
             phase.end_event = torch.cuda.Event(enable_timing=True)
-
-    # Export sample images.
-    grid_size = None
-    grid_z = None
-    grid_c = None
-    with torch.no_grad():
-        if rank == 0:
-            print('Exporting sample images...')
-            grid_size, images, lqs, labels = setup_snapshot_image_grid(training_set=training_set)
-            save_image_grid(images, os.path.join(run_dir, 'reals.png'), drange=[0,255], grid_size=grid_size)
-            grid_lq = (torch.from_numpy(lqs) / 127.5 - 1).to(device).split(batch_gpu)
-            grid_z = torch.randn([labels.shape[0], G.gen_bank.z_dim], device=device).split(batch_gpu)
-            grid_c = torch.from_numpy(labels).to(device).split(batch_gpu)
-            images = torch.cat([G_ema(z=z, c=c, lq=lq, noise_mode='const').cpu() for z, c, lq in zip(grid_z, grid_c, grid_lq)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, 'fakes_init.png'), drange=[-1,1], grid_size=grid_size)
 
     # Initialize logs.
     if rank == 0:
@@ -373,18 +330,6 @@ def training_loop(
             if rank == 0:
                 print()
                 print('Aborting...')
-
-        # Save image snapshot.
-        if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-            images = torch.cat([G_ema(z=z, c=c, lq=lq, noise_mode='const').cpu() for z, c, lq in zip(grid_z, grid_c, grid_lq)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png'), drange=[-1,1], grid_size=grid_size)
-
-        # Save debugging images. Done frequently, every 5 ticks.
-        if (rank == 0) and (image_snapshot_ticks is not None) and (cur_tick % 10 == 0):
-            dbg_ind = (cur_tick / 10) % 5  # Uses a rotating buffer so as to not produce a shitload of images.
-            with torch.no_grad():
-                images = torch.cat([G(z=z, c=c, lq=lq, noise_mode='const').cpu() for z, c, lq in zip(grid_z, grid_c, grid_lq)]).numpy()
-            save_image_grid(images, os.path.join(run_dir, f'debug_image_{dbg_ind}.png'), drange=[-1,1], grid_size=grid_size)
 
         # Save network snapshot.
         snapshot_pkl = None

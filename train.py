@@ -66,17 +66,9 @@ def setup_training_loop_kwargs(
     nobench    = None, # Disable cuDNN benchmarking: <bool>, default = False
     workers    = None, # Override number of DataLoader workers: <int>, default = 3
 
-    switched_conv_breadth = None,
     ref_gpus = -1, # When using config='auto', this specifies how much batch accumulation you want to do. ref_gpus=2 means 2 forward passes per batch, for example.
-    glean_scale_factor = 8,
-    stop_discriminator_gradients_at_glean = True,
-    stop_synthesis_gradients_at_glean = True,
-    stop_mapping_gradients_at_glean = True,
-    grey_consistency_loss=False,
-    sr_loss_additional_downsampling_factor=1
 ):
     args = dnnlib.EasyDict()
-    args.switched_conv_breadth = switched_conv_breadth
 
     # ------------------------------------------
     # General options: gpus, snap, metrics, seed
@@ -97,8 +89,7 @@ def setup_training_loop_kwargs(
     args.image_snapshot_ticks = snap
     args.network_snapshot_ticks = snap
 
-    if metrics is None:
-        metrics = ['fid10k_full']
+    metrics = []
     assert isinstance(metrics, list)
     if not all(metric_main.is_valid_metric(metric) for metric in metrics):
         raise UserError('\n'.join(['--metrics can only contain the following values:'] + metric_main.list_valid_metrics()))
@@ -117,10 +108,10 @@ def setup_training_loop_kwargs(
     assert isinstance(data, str)
     if data_lq is None:
         args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ImageFolderDataset', path=data,
-                                                   use_labels=True, max_size=None, xflip=False, lq_scale=glean_scale_factor)
+                                                   use_labels=True, max_size=None, xflip=False)
     else:
         args.training_set_kwargs = dnnlib.EasyDict(class_name='training.dataset.ConvergedDataset', path=data, path_lq=data_lq,
-                                                   use_labels=True, max_size=None, xflip=False, lq_scale=glean_scale_factor)
+                                                   use_labels=True, max_size=None, xflip=False)
 
     args.data_loader_kwargs = dnnlib.EasyDict(pin_memory=True, num_workers=3, prefetch_factor=2)
     try:
@@ -196,13 +187,10 @@ def setup_training_loop_kwargs(
         spec.gamma = 0.0002 * (res ** 2) / spec.mb # heuristic formula
         spec.ema = spec.mb * 10 / 32
 
-    glean_res = args.training_set_kwargs.resolution//glean_scale_factor
-    args.G_kwargs = dnnlib.EasyDict(class_name='training.gan_sr.SrGenerator', z_dim=512, w_dim=512, enc_input_resolution=glean_res,
-                                    freeze_latent_dict=stop_synthesis_gradients_at_glean, freeze_mapping_network=stop_mapping_gradients_at_glean,
+    args.G_kwargs = dnnlib.EasyDict(class_name='training.gan_diffuse.DiffusionGenerator', z_dim=512, w_dim=512,
                                     mapping_kwargs=dnnlib.EasyDict(), synthesis_kwargs=dnnlib.EasyDict())
-    disc_stop_training_at = glean_res if stop_discriminator_gradients_at_glean else 0
     args.D_kwargs = dnnlib.EasyDict(class_name='training.networks.Discriminator', block_kwargs=dnnlib.EasyDict(),
-                                    stop_training_at=disc_stop_training_at, mapping_kwargs=dnnlib.EasyDict(),
+                                    mapping_kwargs=dnnlib.EasyDict(),
                                     epilogue_kwargs=dnnlib.EasyDict())
     args.G_kwargs.synthesis_kwargs.channel_base = args.D_kwargs.channel_base = int(spec.fmaps * 32768)
     args.G_kwargs.synthesis_kwargs.channel_max = args.D_kwargs.channel_max = 512
@@ -210,13 +198,10 @@ def setup_training_loop_kwargs(
     args.G_kwargs.synthesis_kwargs.num_fp16_res = args.D_kwargs.num_fp16_res = 4 # enable mixed-precision training
     args.G_kwargs.synthesis_kwargs.conv_clamp = args.D_kwargs.conv_clamp = 256 # clamp activations to avoid float16 overflow
     args.D_kwargs.epilogue_kwargs.mbstd_group_size = spec.mbstd
-    args.glean_scale_factor = glean_scale_factor
 
     args.G_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0,0.99], eps=1e-8)
     args.D_opt_kwargs = dnnlib.EasyDict(class_name='torch.optim.Adam', lr=spec.lrate, betas=[0,0.99], eps=1e-8)
     args.loss_kwargs = dnnlib.EasyDict(class_name='training.loss.StyleGAN2Loss', r1_gamma=spec.gamma)
-    args.loss_kwargs.sr_loss_avg_channels = grey_consistency_loss
-    args.loss_kwargs.sr_loss_additional_downsampling_factor = sr_loss_additional_downsampling_factor
 
     args.total_kimg = spec.kimg
     args.batch_size = spec.mb
@@ -469,24 +454,7 @@ class CommaSeparatedList(click.ParamType):
 @click.option('--workers', help='Override number of DataLoader workers', type=int, metavar='INT')
 
 # Extras
-@click.option('--switched_conv_breadth', help='When specified, converts network to switched_conv mode with the specified breadth', type=int, metavar='INT')
 @click.option('--ref_gpus', help='Specifies batch accumulation via "virtual" gpus', type=int, metavar='INT', default=1)
-
-# GLEAN
-@click.option('--glean_scale_factor', help='GLEAN upsampling factor', type=int, default=8, metavar='INT')
-# These stop gradients should all be set to true when initially training the network using a pretrained
-# "Generative bank". You can optionally set them to true later on once training has stabilized.
-@click.option('--stop_discriminator_gradients_at_glean',
-              help='Whether or not to stop the low res discriminator parameters from being trained',
-              type=bool, default=True, metavar='BOOL')
-@click.option('--stop_synthesis_gradients_at_glean',
-              help='Whether or not to stop the generator\'s synthesis network parameters from being trained',
-              type=bool, default=True, metavar='BOOL')
-@click.option('--stop_mapping_gradients_at_glean',
-              help='Whether or not to stop the generator\'s mapping network parameters from being trained',
-              type=bool, default=True, metavar='BOOL')
-@click.option('--grey_consistency_loss', help='When set, the LQ consistency loss averages the image channels (e.g. greyscale).', type=bool, default=False)
-@click.option('--sr_loss_additional_downsampling_factor', help='When set, the LQ consistency loss additionally downsamples the LQ image by this factor.', type=float, default=1)
 
 def main(ctx, outdir, dry_run, **config_kwargs):
     """Train a GAN using the techniques described in the paper
