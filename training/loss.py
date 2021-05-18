@@ -41,28 +41,28 @@ class StyleGAN2Loss(Loss):
         self.sr_loss_additional_downsampling_factor = sr_loss_additional_downsampling_factor
         self.diffuser = GaussianDiffusion(betas=get_named_beta_schedule('cosine', 2000),
                                           model_mean_type=ModelMeanType.EPSILON,
-                                          model_var_type=ModelVarType.LEARNED_RANGE,
+                                          model_var_type=ModelVarType.FIXED_LARGE,
                                           loss_type=LossType.MSE)
 
     def produce_diffused_pair(self, img):
         # Draw from a uniform random distribution. TODO: Port over the more complex samplers from the openai codebase.
         t = torch.randint(0, len(self.diffuser.betas)-2, (img.shape[0],), device=img.device)
-        return self.diffuser.q_sample_two(img, t)
+        return self.diffuser.q_sample_two(img, t) + (t,)
 
-    def run_G(self, z, prior, sync):
+    def run_G(self, z, prior, t, sync):
         if hasattr(self.G, 'module'):
             rawG = self.G.module
         else:
             rawG = self.G
         with misc.ddp_sync(self.G, sync):
-            enc_c = rawG.do_encoder(prior=prior)
+            enc_c, time_emb = rawG.do_encoder(prior=prior, time=t)
             ws = rawG.do_latent_mapping_with_mixing(z=z, mixing_prob=self.style_mixing_prob)
-            img = self.G(ws=ws, enc_conv_outs=enc_c)
+            img = self.G(ws=ws, enc_conv_outs=enc_c, time_emb=time_emb)
         return img, ws
 
-    def run_D(self, eps, prior, img, sync):
+    def run_D(self, eps, prior, img, t, sync):
         with misc.ddp_sync(self.D, sync):
-            logits = self.D(eps, prior, img)
+            logits = self.D(eps, prior, img, time=t)
         return logits
 
     def accumulate_gradients(self, phase, real_img, real_img_lq, real_c, gen_z, gen_c, sync, gain):
@@ -73,14 +73,14 @@ class StyleGAN2Loss(Loss):
         do_Dr1   = (phase in ['Dreg', 'Dboth']) and (self.r1_gamma != 0)
 
         img = real_img.detach()
-        posterior, prior = self.produce_diffused_pair(real_img)
+        posterior, prior, t = self.produce_diffused_pair(real_img)
         real_eps = prior - posterior
 
         # Gmain: Maximize logits for generated images.
         if do_Gmain:
             with torch.autograd.profiler.record_function('Gmain_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, prior, sync=(sync and not do_Gpl)) # May get synced by Gpl.
-                gen_logits = self.run_D(gen_img, prior, img, sync=False)
+                gen_img, _gen_ws = self.run_G(gen_z, prior, t, sync=(sync and not do_Gpl)) # May get synced by Gpl.
+                gen_logits = self.run_D(gen_img, prior, img, t, sync=False)
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Gtotal = torch.nn.functional.softplus(-gen_logits) # -log(sigmoid(gen_logits))
@@ -92,7 +92,7 @@ class StyleGAN2Loss(Loss):
         if do_Gpl:
             with torch.autograd.profiler.record_function('Gpl_forward'):
                 batch_size = gen_z.shape[0] // self.pl_batch_shrink
-                gen_img, gen_ws = self.run_G(gen_z[:batch_size], prior[:batch_size], sync=sync)
+                gen_img, gen_ws = self.run_G(gen_z[:batch_size], prior[:batch_size], t[:batch_size], sync=sync)
                 pl_noise = torch.randn_like(gen_img) / np.sqrt(gen_img.shape[2] * gen_img.shape[3])
                 with torch.autograd.profiler.record_function('pl_grads'), conv2d_gradfix.no_weight_gradients():
                     pl_grads = torch.autograd.grad(outputs=[(gen_img * pl_noise).sum()], inputs=[gen_ws], create_graph=True, only_inputs=True)[0]
@@ -110,8 +110,8 @@ class StyleGAN2Loss(Loss):
         loss_Dgen = 0
         if do_Dmain:
             with torch.autograd.profiler.record_function('Dgen_forward'):
-                gen_img, _gen_ws = self.run_G(gen_z, prior, sync=False)
-                gen_logits = self.run_D(gen_img, prior, img, sync=False) # Gets synced by loss_Dreal.
+                gen_img, _gen_ws = self.run_G(gen_z, prior, t, sync=False)
+                gen_logits = self.run_D(gen_img, prior, img, t, sync=False) # Gets synced by loss_Dreal.
                 training_stats.report('Loss/scores/fake', gen_logits)
                 training_stats.report('Loss/signs/fake', gen_logits.sign())
                 loss_Dgen = torch.nn.functional.softplus(gen_logits) # -log(1 - sigmoid(gen_logits))
@@ -124,7 +124,7 @@ class StyleGAN2Loss(Loss):
             name = 'Dreal_Dr1' if do_Dmain and do_Dr1 else 'Dreal' if do_Dmain else 'Dr1'
             with torch.autograd.profiler.record_function(name + '_forward'):
                 real_eps_tmp = real_eps.detach().requires_grad_(do_Dr1)
-                real_logits = self.run_D(real_eps_tmp, prior, img, sync=sync)
+                real_logits = self.run_D(real_eps_tmp, prior, img, t, sync=sync)
                 training_stats.report('Loss/scores/real', real_logits)
                 training_stats.report('Loss/signs/real', real_logits.sign())
 

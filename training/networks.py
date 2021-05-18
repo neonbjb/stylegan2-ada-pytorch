@@ -8,6 +8,7 @@
 
 import numpy as np
 import torch
+import torch.nn as nn
 from tensorflow_datasets.core.utils import nullcontext
 
 from torch_utils import misc
@@ -18,6 +19,7 @@ from torch_utils.ops import bias_act
 from torch_utils.ops import fma
 
 #----------------------------------------------------------------------------
+
 
 @misc.profiled_function
 def normalize_2nd_moment(x, dim=1, eps=1e-8):
@@ -351,6 +353,7 @@ class SynthesisBlock(torch.nn.Module):
         conv_clamp          = None,         # Clamp the output of convolution layers to +-X, None = disable clamping.
         use_fp16            = False,        # Use FP16 for this block?
         fp16_channels_last  = False,        # Use channels-last memory format with FP16?
+        time_embedding_dim = 0,
         **layer_kwargs,                     # Arguments for SynthesisLayer.
     ):
         assert architecture in ['orig', 'skip', 'resnet']
@@ -362,6 +365,7 @@ class SynthesisBlock(torch.nn.Module):
         self.is_last = is_last
         self.architecture = architecture
         self.use_fp16 = use_fp16
+        self.time_embedding_dim = time_embedding_dim
         self.channels_last = (use_fp16 and fp16_channels_last)
         self.register_buffer('resample_filter', upfirdn2d.setup_filter(resample_filter))
         self.num_conv = 0
@@ -374,6 +378,15 @@ class SynthesisBlock(torch.nn.Module):
             self.conv0 = SynthesisLayer(in_channels, out_channels, w_dim=w_dim, resolution=resolution, up=2,
                 resample_filter=resample_filter, conv_clamp=conv_clamp, channels_last=self.channels_last, **layer_kwargs)
             self.num_conv += 1
+
+        if time_embedding_dim > 0:
+            self.emb_layers = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(
+                    time_embedding_dim,
+                    in_channels,
+                ),
+            )
 
         self.conv1 = SynthesisLayer(out_channels, out_channels, w_dim=w_dim, resolution=resolution,
             conv_clamp=conv_clamp, channels_last=self.channels_last, **layer_kwargs)
@@ -388,7 +401,7 @@ class SynthesisBlock(torch.nn.Module):
             self.skip = Conv2dLayer(in_channels, out_channels, kernel_size=1, bias=False, up=2,
                 resample_filter=resample_filter, channels_last=self.channels_last)
 
-    def forward(self, x, img, ws, force_fp32=False, fused_modconv=None, **layer_kwargs):
+    def forward(self, x, img, ws, time_emb=None, force_fp32=False, fused_modconv=None, **layer_kwargs):
         misc.assert_shape(ws, [None, self.num_conv + self.num_torgb, self.w_dim])
         w_iter = iter(ws.unbind(dim=1))
         dtype = torch.float16 if self.use_fp16 and not force_fp32 else torch.float32
@@ -404,6 +417,14 @@ class SynthesisBlock(torch.nn.Module):
         else:
             misc.assert_shape(x, [None, self.in_channels, 3 * self.resolution // 8, self.resolution // 2])
             x = x.to(dtype=dtype, memory_format=memory_format)
+
+        # Time.
+        if self.time_embedding_dim > 0 and self.in_channels > 0:
+            assert time_emb is not None
+            time_emb = self.emb_layers(time_emb)
+            b, e = time_emb.shape
+            time_emb = time_emb.view(b, e, 1, 1).to(dtype=dtype, memory_format=memory_format)
+            x = x + time_emb
 
         # Main layers.
         if self.in_channels == 0:
@@ -523,6 +544,7 @@ class DiscriminatorBlock(torch.nn.Module):
         resolution,                         # Resolution of this block.
         img_channels,                       # Number of input color channels.
         first_layer_idx,                    # Index of the first layer.
+        time_emb_dim=0,
         architecture        = 'resnet',     # Architecture: 'orig', 'skip', 'resnet'.
         activation          = 'lrelu',      # Activation function: 'relu', 'lrelu', etc.
         resample_filter     = [1,3,3,1],    # Low-pass filter to apply when resampling activations.
@@ -543,6 +565,16 @@ class DiscriminatorBlock(torch.nn.Module):
         self.use_fp16 = use_fp16
         self.channels_last = (use_fp16 and fp16_channels_last)
         self.register_buffer('resample_filter', upfirdn2d.setup_filter(resample_filter))
+        self.time_embed_dim = time_emb_dim
+
+        if time_emb_dim > 0:
+            self.emb_layers = nn.Sequential(
+                nn.SiLU(),
+                nn.Linear(
+                    time_emb_dim,
+                    tmp_channels,
+                ),
+            )
 
         self.num_layers = 0
         def trainable_gen():
@@ -567,7 +599,7 @@ class DiscriminatorBlock(torch.nn.Module):
             self.skip = Conv2dLayer(tmp_channels, out_channels, kernel_size=1, bias=False, down=2 if downsample else 1,
                 trainable=next(trainable_iter), resample_filter=resample_filter, channels_last=self.channels_last)
 
-    def forward(self, x, img, force_fp32=False):
+    def forward(self, x, img, time_emb=None, force_fp32=False):
         dtype = torch.float16 if self.use_fp16 and not force_fp32 else torch.float32
         memory_format = torch.channels_last if self.channels_last and not force_fp32 else torch.contiguous_format
 
@@ -583,6 +615,14 @@ class DiscriminatorBlock(torch.nn.Module):
             y = self.fromrgb(img)
             x = x + y if x is not None else y
             img = upfirdn2d.downsample2d(img, self.resample_filter) if self.architecture == 'skip' else None
+
+        # Time.
+        if self.time_embed_dim > 0:
+            assert time_emb is not None
+            time_emb = self.emb_layers(time_emb)
+            b, e = time_emb.shape
+            time_emb = time_emb.view(b, e, 1, 1).to(dtype=dtype, memory_format=memory_format)
+            x = x + time_emb
 
         # Main layers.
         if self.architecture == 'resnet':
@@ -699,6 +739,7 @@ class Discriminator(torch.nn.Module):
         mapping_kwargs      = {},       # Arguments for MappingNetwork.
         epilogue_kwargs     = {},       # Arguments for DiscriminatorEpilogue.
         stop_training_at    = 0,        # Resolution below which grads will no longer be accumulated.
+        time_emb_dim = 0,
     ):
         super().__init__()
         img_channels *= 3  # Actual input channels is 3x the specified channels: the predicted noise diffusion from the generator (or the real noise diffusion), the prior post-diffusion image, and the original seed image.
@@ -710,6 +751,14 @@ class Discriminator(torch.nn.Module):
         self.stop_training_at = stop_training_at
         channels_dict = {res: min(channel_base // res, channel_max) for res in self.block_resolutions + [4]}
         fp16_resolution = max(2 ** (self.img_resolution_log2 + 1 - num_fp16_res), 8)
+
+        if time_emb_dim > 0:
+            self.time_embed = nn.Sequential(
+                nn.Linear(time_emb_dim, time_emb_dim),
+                nn.SiLU(),
+                nn.Linear(time_emb_dim, time_emb_dim),
+            )
+        self.time_emb_dim = time_emb_dim
 
         if cmap_dim is None:
             cmap_dim = channels_dict[4]
@@ -724,14 +773,18 @@ class Discriminator(torch.nn.Module):
             out_channels = channels_dict[res // 2]
             use_fp16 = (res >= fp16_resolution)
             block = DiscriminatorBlock(in_channels, tmp_channels, out_channels, resolution=res,
-                first_layer_idx=cur_layer_idx, use_fp16=use_fp16, **block_kwargs, **common_kwargs)
+                first_layer_idx=cur_layer_idx, use_fp16=use_fp16, time_emb_dim=time_emb_dim, **block_kwargs, **common_kwargs)
             setattr(self, f'b{res}', block)
             cur_layer_idx += block.num_layers
         if c_dim > 0:
             self.mapping = MappingNetwork(z_dim=0, w_dim=cmap_dim, num_ws=None, w_avg_beta=None, **mapping_kwargs)
         self.b4 = DiscriminatorEpilogue(channels_dict[4], cmap_dim=cmap_dim, resolution=4, **epilogue_kwargs, **common_kwargs)
 
-    def forward(self, eps, prior, img, **block_kwargs):
+    def forward(self, eps, prior, img, time=None, **block_kwargs):
+        # Generate time embeddings
+        from training.gan_diffuse import timestep_embedding
+        time_emb = self.time_embed(timestep_embedding(time, self.time_emb_dim))
+
         img = torch.cat([eps, prior, img], dim=1)
         x = None
         for res in self.block_resolutions:
@@ -739,7 +792,7 @@ class Discriminator(torch.nn.Module):
             if res < self.stop_training_at:
                 for p in block.parameters():
                     p.requires_grad = False
-            x, img = block(x, img, **block_kwargs)
+            x, img = block(x, img, time_emb=time_emb, **block_kwargs)
 
         if self.stop_training_at > 0:
             for p in self.b4.parameters():

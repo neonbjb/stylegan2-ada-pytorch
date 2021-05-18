@@ -12,6 +12,7 @@ import numpy as np
 import torch
 import torch as th
 from torch.nn.functional import interpolate
+from tqdm import tqdm
 
 
 def normal_kl(mean1, logvar1, mean2, logvar2):
@@ -374,8 +375,8 @@ class GaussianDiffusion:
             sr_base_images = sr_base_images.to(x.device)
             inp = th.cat([x, sr_base_images], dim=1)
         else:
-            inp = th.cat([x, x], dim=1)
-        model_output = model(inp, self._scale_timesteps(t), **model_kwargs)
+            inp = x
+        model_output = model(prior=inp, time=self._scale_timesteps(t), **model_kwargs)
 
         if self.model_var_type in [ModelVarType.LEARNED, ModelVarType.LEARNED_RANGE]:
             assert model_output.shape == (B, C * 2, *x.shape[2:])
@@ -635,12 +636,6 @@ class GaussianDiffusion:
         else:
             img = th.randn(*shape, device=device)
         indices = list(range(self.num_timesteps))[::-1]
-
-        if progress:
-            # Lazy import so that we don't depend on tqdm.
-            from tqdm.auto import tqdm
-
-            indices = tqdm(indices)
 
         for i in tqdm(indices):
             t = th.tensor([i] * shape[0], device=device)
@@ -1024,7 +1019,7 @@ class GaussianDiffusion:
 if __name__ == '__main__':
     diffuser = GaussianDiffusion(betas=get_named_beta_schedule('cosine', 2000),
                                       model_mean_type=ModelMeanType.EPSILON,
-                                      model_var_type=ModelVarType.FIXED_SMALL,
+                                      model_var_type=ModelVarType.FIXED_LARGE,
                                       loss_type=LossType.MSE)
     torch.manual_seed(0)
     n=torch.randn((1,3,64,64))
