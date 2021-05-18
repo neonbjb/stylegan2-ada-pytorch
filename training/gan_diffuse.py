@@ -26,7 +26,7 @@ def opt_get(d, keys, default):
     return d
 
 
-def timestep_embedding(timesteps, dim, max_period=10000):
+def timestep_embedding(timesteps, dim, max_period=2000):
     """
     Create sinusoidal timestep embeddings.
 
