@@ -15,6 +15,8 @@ import psutil
 import PIL.Image
 import numpy as np
 import torch
+import torchvision
+
 import dnnlib
 from torch_utils import misc
 from torch_utils import training_stats
@@ -27,43 +29,11 @@ from metrics import metric_main
 #----------------------------------------------------------------------------
 from training.switched_conv import SwitchedConvConversionWrapper
 
-
-def setup_snapshot_image_grid(training_set, random_seed=0):
-    rnd = np.random.RandomState(random_seed)
-    gw = np.clip(7680 // training_set.image_shape[2], 7, 32)
-    gh = np.clip(4320 // training_set.image_shape[2], 4, 32)
-
-    # No labels => show random subset of training samples.
-    if not training_set.has_labels:
-        all_indices = list(range(len(training_set)))
-        rnd.shuffle(all_indices)
-        grid_indices = [all_indices[i % len(all_indices)] for i in range(gw * gh)]
-
-    else:
-        # Group training samples by label.
-        label_groups = dict() # label => [idx, ...]
-        for idx in range(len(training_set)):
-            label = tuple(training_set.get_details(idx).raw_label.flat[::-1])
-            if label not in label_groups:
-                label_groups[label] = []
-            label_groups[label].append(idx)
-
-        # Reorder.
-        label_order = sorted(label_groups.keys())
-        for label in label_order:
-            rnd.shuffle(label_groups[label])
-
-        # Organize into grid.
-        grid_indices = []
-        for y in range(gh):
-            label = label_order[y % len(label_order)]
-            indices = label_groups[label]
-            grid_indices += [indices[x % len(indices)] for x in range(gw)]
-            label_groups[label] = [indices[(i + gw) % len(indices)] for i in range(len(indices))]
-
-    # Load data.
-    images, lq, labels = zip(*[training_set[i] for i in grid_indices])
-    return (gw, gh), np.stack(images), np.stack(lq), np.stack(labels)
+def export_sample_images(model, diffuser, resolution, output_path, device, batch=8):
+    print("Sampling from network for test snapshot")
+    z = torch.randn(batch, 512).to(device)
+    sample = diffuser.p_sample_loop(model, (batch,3,resolution*3//4,resolution), model_kwargs={'z': z})
+    torchvision.utils.save_image(sample, output_path)
 
 #----------------------------------------------------------------------------
 
@@ -210,6 +180,11 @@ def training_loop(
             phase.start_event = torch.cuda.Event(enable_timing=True)
             phase.end_event = torch.cuda.Event(enable_timing=True)
 
+    # Export sample images.
+    with torch.no_grad():
+        if rank == 0:
+            export_sample_images(G_ema, loss.diffuser, img_resolution, os.path.join(run_dir, 'fakes_init.png'), device)
+
     # Initialize logs.
     if rank == 0:
         print('Initializing logs...')
@@ -241,7 +216,6 @@ def training_loop(
     if progress_fn is not None:
         progress_fn(0, total_kimg)
     while True:
-
         # Fetch training data.
         with torch.autograd.profiler.record_function('data_fetch'):
             phase_real_img, phase_real_img_lq, phase_real_c = next(training_set_iterator)
@@ -350,6 +324,9 @@ def training_loop(
             if rank == 0:
                 with open(snapshot_pkl, 'wb') as f:
                     pickle.dump(snapshot_data, f)
+
+        if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
+            export_sample_images(G_ema, loss.diffuser, img_resolution, os.path.join(run_dir, 'fakes_init.png'), device)
 
         # Evaluate metrics.
         if (snapshot_data is not None) and (len(metrics) > 0):
