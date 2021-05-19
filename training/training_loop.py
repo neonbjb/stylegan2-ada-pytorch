@@ -326,7 +326,7 @@ def training_loop(
                     pickle.dump(snapshot_data, f)
 
         if (rank == 0) and (image_snapshot_ticks is not None) and (done or cur_tick % image_snapshot_ticks == 0):
-            export_sample_images(G_ema, loss.diffuser, img_resolution, os.path.join(run_dir, 'fakes_init.png'), device)
+            export_sample_images(G_ema, loss.diffuser, img_resolution, os.path.join(run_dir, os.path.join(run_dir, f'fakes{cur_nimg//1000:06d}.png')), device)
 
         # Evaluate metrics.
         if (snapshot_data is not None) and (len(metrics) > 0):
